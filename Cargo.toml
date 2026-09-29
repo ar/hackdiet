@@ -2,6 +2,7 @@
 name = "hackdiet"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 description = "A Markdown weight log with Hacker's Diet trends and Ghostty charts"
 
 [dependencies]
@@ -11,4 +12,3 @@ fs2 = "0.4"
 plotters = { version = "0.3", default-features = false, features = ["bitmap_backend", "bitmap_encoder", "ttf", "line_series", "point_series"] }
 tempfile = "3"
 terminal_size = "0.4"
-
