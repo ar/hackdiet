@@ -68,6 +68,10 @@ fn png_export_and_single_entry_work_without_a_terminal() {
     assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
     assert_eq!(u32::from_be_bytes(png[16..20].try_into().unwrap()), 1200);
     assert_eq!(u32::from_be_bytes(png[20..24].try_into().unwrap()), 600);
+    ok(dir, &["--no-graph", "height", "171"]);
+    ok(dir, &["--png", "bmi.png"]);
+    let bmi_png = fs::read(dir.join("bmi.png")).unwrap();
+    assert_ne!(png, bmi_png, "saved height should add the BMI axis");
     let before = fs::read(dir.join("hackdiet.md")).unwrap();
     assert!(!run(dir, &["--png", "./hackdiet.md"]).status.success());
     assert_eq!(fs::read(dir.join("hackdiet.md")).unwrap(), before);

@@ -219,7 +219,7 @@ fn run() -> Result<()> {
         let graphics = std::io::stdout().is_terminal() && (opt.kitty || chart::supported());
         if graphics || opt.png.is_some() {
             let image = tempfile::Builder::new().suffix(".png").tempfile()?;
-            chart::render(image.path(), &selected, start, end)?;
+            chart::render(image.path(), &selected, start, end, log.height)?;
             if let Some(path) = opt.png {
                 let path = resolve_path(&path)?;
                 let export = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;

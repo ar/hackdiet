@@ -13,7 +13,13 @@ pub fn supported() -> bool {
         || env::var("TERM").is_ok_and(|s| s == "xterm-ghostty" || s == "xterm-kitty")
 }
 
-pub fn render(path: &Path, days: &[Day], start: NaiveDate, end: NaiveDate) -> Result<()> {
+pub fn render(
+    path: &Path,
+    days: &[Day],
+    start: NaiveDate,
+    end: NaiveDate,
+    height: Option<f64>,
+) -> Result<()> {
     let bg = RGBColor(250, 250, 247);
     let red = RGBColor(197, 55, 58);
     let green = RGBColor(43, 132, 109);
@@ -30,6 +36,8 @@ pub fn render(path: &Path, days: &[Day], start: NaiveDate, end: NaiveDate) -> Re
         .fold(f64::NEG_INFINITY, f64::max);
     let padding = ((max - min) * 0.18).max(0.2);
     let span = (end - start).num_days().max(1) as f64;
+    let weight_range = (min - padding)..(max + padding);
+    let height_squared = height.map(|cm| (cm / 100.0).powi(2));
     let mut chart = ChartBuilder::on(&root)
         .caption(
             format!(
@@ -42,7 +50,13 @@ pub fn render(path: &Path, days: &[Day], start: NaiveDate, end: NaiveDate) -> Re
         .margin(24)
         .x_label_area_size(50)
         .y_label_area_size(75)
-        .build_cartesian_2d(-0.15..span + 0.15, (min - padding)..(max + padding))?;
+        .right_y_label_area_size(if height.is_some() { 75 } else { 0 })
+        .build_cartesian_2d(-0.15..span + 0.15, weight_range.clone())?
+        .set_secondary_coord(
+            -0.15..span + 0.15,
+            (weight_range.start / height_squared.unwrap_or(1.0))
+                ..(weight_range.end / height_squared.unwrap_or(1.0)),
+        );
     let label = |x: &f64| {
         if *x < 0.0 || *x > span || (x - x.round()).abs() > 0.01 {
             return String::new();
@@ -67,6 +81,17 @@ pub fn render(path: &Path, days: &[Day], start: NaiveDate, end: NaiveDate) -> Re
         .light_line_style(RGBColor(235, 236, 231))
         .bold_line_style(RGBColor(220, 223, 217))
         .draw()?;
+    if height.is_some() {
+        chart
+            .configure_secondary_axes()
+            .y_labels(7)
+            .y_label_formatter(&|y| format!("{y:.1}"))
+            .y_desc("BMI")
+            .label_style(("sans-serif", 20).into_font().color(&ink))
+            .axis_desc_style(("sans-serif", 20))
+            .axis_style(RGBColor(160, 165, 170))
+            .draw()?;
+    }
     let x = |d: &Day| (d.date - start).num_days() as f64;
     chart
         .draw_series(LineSeries::new(
