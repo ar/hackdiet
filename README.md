@@ -41,10 +41,17 @@ hackdiet height 171
 Example summary (values depend on your history):
 
 ```text
-Weekly loss 0.14 kilograms. Daily deficit: 154 calories.
-Body mass index: mean 28.6, most recent 28.7.
-Latest trend: 83.92 kg (2026-09-29).
+Weekly loss         0.14 kg/week
+Estimated deficit   154 kcal/day
+BMI                 28.7 (mean 28.6)
+Latest trend        83.92 kg (2026-09-29)
 ```
+
+In Ghostty and Kitty, the chart includes the selected dates, weekly change,
+estimated daily calorie balance, latest BMI (with height set), and latest trend.
+The statistics appear as large, muted numbers above the plot. Weekly gain and
+estimated calorie excess use muted red. `--no-graph` and redirected output retain
+the aligned text summary, including mean BMI.
 
 Weight change and calorie estimates require at least two weigh-ins in the selected
 period. A first entry still produces a chart and, with height set, a BMI.

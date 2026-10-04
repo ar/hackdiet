@@ -213,10 +213,15 @@ fn run() -> Result<()> {
         .into_iter()
         .filter(|d| d.date >= start && d.date <= end)
         .collect();
-    println!("{start} to {end}");
-    stats::print_summary(&selected, log.height);
+    let graphics = !opt.no_graph
+        && !selected.is_empty()
+        && std::io::stdout().is_terminal()
+        && (opt.kitty || chart::supported());
+    if !graphics {
+        println!("{}", stats::period_label(start, end));
+        stats::print_summary(&selected, log.height);
+    }
     if !opt.no_graph && !selected.is_empty() {
-        let graphics = std::io::stdout().is_terminal() && (opt.kitty || chart::supported());
         if graphics || opt.png.is_some() {
             let image = tempfile::Builder::new().suffix(".png").tempfile()?;
             chart::render(image.path(), &selected, start, end, log.height)?;

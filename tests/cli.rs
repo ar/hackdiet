@@ -40,11 +40,12 @@ fn daily_workflow_updates_in_place_and_recomputes_history() {
         &["--no-graph", "--date", &yesterday, "84", "first | note"],
     );
     let text = ok(dir, &["--no-graph", "83.5", "after a walk"]);
-    assert!(text.contains("Weekly loss 0.35 kilograms. Daily deficit: 386 calories."));
-    assert!(text.contains("Body mass index:"));
+    assert!(text.contains("Weekly loss         0.35 kg/week"));
+    assert!(text.contains("Estimated deficit   386 kcal/day"));
+    assert!(text.contains("BMI                 "));
     let text = ok(dir, &["--no-graph", "83.0"]);
     assert!(text.contains("Updated"));
-    assert!(text.contains("Daily deficit: 772 calories."));
+    assert!(text.contains("Estimated deficit   772 kcal/day"));
     let log = fs::read_to_string(dir.join("hackdiet.md")).unwrap();
     assert_eq!(log.lines().filter(|l| l.starts_with("| 20")).count(), 2);
     assert!(log.contains("after a walk"));

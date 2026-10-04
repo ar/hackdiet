@@ -1,5 +1,5 @@
 use crate::log::Entry;
-use chrono::NaiveDate;
+use chrono::{Datelike, NaiveDate};
 use std::collections::BTreeMap;
 
 #[derive(Debug)]
@@ -67,37 +67,72 @@ pub fn bmi(days: &[Day], height: f64) -> Option<(f64, f64)> {
     Some((mean / squared, recent / squared))
 }
 
+pub fn period_label(start: NaiveDate, end: NaiveDate) -> String {
+    if start.year() != end.year() {
+        format!("{}–{}", start.format("%d %b %Y"), end.format("%d %b %Y"))
+    } else if start.month() != end.month() {
+        format!("{}–{}", start.format("%d %b"), end.format("%d %b %Y"))
+    } else {
+        format!("{}–{}", start.format("%d"), end.format("%d %b %Y"))
+    }
+}
+
+pub fn change_labels(days: &[Day]) -> Option<[(String, &'static str); 2]> {
+    let slope = slope(days)?;
+    let weekly = slope * 7.0;
+    let calories = slope * 7716.0;
+    Some(if weekly.abs() < 0.005 && calories.abs() < 0.5 {
+        [
+            ("0.00 kg/week".into(), "weight stable"),
+            ("0 kcal/day".into(), "estimated balance"),
+        ]
+    } else {
+        [
+            (
+                format!("{:.2} kg/week", weekly.abs()),
+                if slope < 0.0 {
+                    "weekly loss"
+                } else {
+                    "weekly gain"
+                },
+            ),
+            (
+                format!("{:.0} kcal/day", calories.abs()),
+                if slope < 0.0 {
+                    "estimated deficit"
+                } else {
+                    "estimated excess"
+                },
+            ),
+        ]
+    })
+}
+
 pub fn print_summary(days: &[Day], height: Option<f64>) {
     if days.is_empty() {
         println!("No weight entries in this period.");
         return;
     }
-    if let Some(slope) = slope(days) {
-        let weekly = slope * 7.0;
-        let calories = slope * 7716.0;
-        if weekly.abs() < 0.005 && calories.abs() < 0.5 {
-            println!("Weight stable. Daily calorie balance: 0 calories.");
-        } else {
-            println!(
-                "Weekly {} {:.2} kilograms. Daily {}: {:.0} calories.",
-                if slope < 0.0 { "loss" } else { "gain" },
-                weekly.abs(),
-                if slope < 0.0 { "deficit" } else { "excess" },
-                calories.abs()
-            );
+    if let Some(labels) = change_labels(days) {
+        for (value, label) in labels {
+            let label = format!("{}{}", label[..1].to_uppercase(), &label[1..]);
+            println!("{label:<19} {value}");
         }
     } else {
         println!("At least two weigh-ins in this period are needed to estimate weight change and calorie balance.");
     }
     if let Some(height) = height {
         if let Some((mean, latest)) = bmi(days, height) {
-            println!("Body mass index: mean {mean:.1}, most recent {latest:.1}.");
+            println!("{:<19} {latest:.1} (mean {mean:.1})", "BMI");
         }
     } else {
         println!("Set height for BMI: hackdiet height <centimeters>.");
     }
     let latest = days.last().unwrap();
-    println!("Latest trend: {:.2} kg ({}).", latest.trend, latest.date);
+    println!(
+        "{:<19} {:.2} kg ({})",
+        "Latest trend", latest.trend, latest.date
+    );
 }
 
 #[cfg(test)]

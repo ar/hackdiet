@@ -1,4 +1,7 @@
-use crate::{stats::Day, Result};
+use crate::{
+    stats::{self, Day},
+    Result,
+};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use chrono::NaiveDate;
 use plotters::prelude::*;
@@ -26,6 +29,76 @@ pub fn render(
     let ink = RGBColor(42, 49, 59);
     let root = BitMapBackend::new(path, (1200, 600)).into_drawing_area();
     root.fill(&bg)?;
+    // Give the summary its own space so it never obscures the weight curves.
+    let (header, plot) = root.split_vertically(142);
+    header.draw(&Text::new(
+        format!("Weight  |  {}", stats::period_label(start, end)),
+        (24, 28),
+        ("sans-serif", 26).into_font().color(&ink),
+    ))?;
+    let metric = |value: String, label: &str, x: i32, color: RGBColor| -> Result<()> {
+        header.draw(&Text::new(
+            value,
+            (x, 79),
+            ("sans-serif", 38).into_font().color(&color.mix(0.65)),
+        ))?;
+        header.draw(&Text::new(
+            label,
+            (x, 116),
+            ("sans-serif", 17).into_font().color(&color.mix(0.65)),
+        ))?;
+        Ok(())
+    };
+    if let Some(labels) = stats::change_labels(days) {
+        for ((value, label), x) in labels.into_iter().zip([100, 370]) {
+            let color = if matches!(label, "weekly gain" | "estimated excess") {
+                red
+            } else {
+                ink
+            };
+            metric(value, label, x, color)?;
+        }
+    } else {
+        header.draw(&Text::new(
+            "Two weigh-ins needed to estimate change",
+            (100, 87),
+            ("sans-serif", 22).into_font().color(&ink.mix(0.65)),
+        ))?;
+    }
+    if let Some((_, latest)) = height.and_then(|h| stats::bmi(days, h)) {
+        metric(format!("{latest:.1}"), "BMI", 660, ink)?;
+    }
+    if let Some(latest) = days.last() {
+        let label = if latest.date == end {
+            "latest trend".into()
+        } else {
+            format!("latest trend · {}", latest.date.format("%d %b"))
+        };
+        metric(
+            format!("{:.2} kg", latest.trend),
+            &label,
+            if height.is_some() { 875 } else { 660 },
+            ink,
+        )?;
+    }
+    header.draw(&PathElement::new(
+        vec![(760, 37), (788, 37)],
+        red.stroke_width(3),
+    ))?;
+    header.draw(&Text::new(
+        "Smoothed trend",
+        (800, 30),
+        ("sans-serif", 17).into_font().color(&ink),
+    ))?;
+    header.draw(&PathElement::new(
+        vec![(985, 32), (990, 37), (985, 42), (980, 37), (985, 32)],
+        green.stroke_width(2),
+    ))?;
+    header.draw(&Text::new(
+        "Daily weight",
+        (1005, 30),
+        ("sans-serif", 17).into_font().color(&ink),
+    ))?;
     let min = days
         .iter()
         .flat_map(|d| [d.trend, d.weight.unwrap_or(d.trend)])
@@ -38,16 +111,9 @@ pub fn render(
     let span = (end - start).num_days().max(1) as f64;
     let weight_range = (min - padding)..(max + padding);
     let height_squared = height.map(|cm| (cm / 100.0).powi(2));
-    let mut chart = ChartBuilder::on(&root)
-        .caption(
-            format!(
-                "Weight  |  {} — {}",
-                start.format("%d %b %Y"),
-                end.format("%d %b %Y")
-            ),
-            ("sans-serif", 28).into_font().color(&ink),
-        )
+    let mut chart = ChartBuilder::on(&plot)
         .margin(24)
+        .margin_top(8)
         .x_label_area_size(50)
         .y_label_area_size(75)
         .right_y_label_area_size(if height.is_some() { 75 } else { 0 })
@@ -93,13 +159,10 @@ pub fn render(
             .draw()?;
     }
     let x = |d: &Day| (d.date - start).num_days() as f64;
-    chart
-        .draw_series(LineSeries::new(
-            days.iter().map(|d| (x(d), d.trend)),
-            red.stroke_width(3),
-        ))?
-        .label("Smoothed trend")
-        .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 28, y)], red.stroke_width(3)));
+    chart.draw_series(LineSeries::new(
+        days.iter().map(|d| (x(d), d.trend)),
+        red.stroke_width(3),
+    ))?;
     // A dot keeps the initial trend visible even with a single entry.
     if days.len() == 1 {
         chart.draw_series(std::iter::once(Circle::new(
@@ -119,32 +182,22 @@ pub fn render(
             RGBColor(170, 180, 177).stroke_width(1),
         ))?;
     }
-    chart
-        .draw_series(PointSeries::of_element(
-            days.iter().filter_map(|d| d.weight.map(|w| (x(d), w))),
-            5,
-            green.stroke_width(2),
-            &|point, size, style| {
-                EmptyElement::at(point)
-                    + Polygon::new(
-                        vec![(0, -size), (size, 0), (0, size), (-size, 0)],
-                        bg.filled(),
-                    )
-                    + PathElement::new(
-                        vec![(0, -size), (size, 0), (0, size), (-size, 0), (0, -size)],
-                        style,
-                    )
-            },
-        ))?
-        .label("Daily weight")
-        .legend(move |(x, y)| Circle::new((x + 14, y), 4, green.stroke_width(2)));
-    chart
-        .configure_series_labels()
-        .position(SeriesLabelPosition::UpperRight)
-        .background_style(bg.mix(0.95))
-        .border_style(RGBColor(220, 223, 217))
-        .label_font(("sans-serif", 19))
-        .draw()?;
+    chart.draw_series(PointSeries::of_element(
+        days.iter().filter_map(|d| d.weight.map(|w| (x(d), w))),
+        5,
+        green.stroke_width(2),
+        &|point, size, style| {
+            EmptyElement::at(point)
+                + Polygon::new(
+                    vec![(0, -size), (size, 0), (0, size), (-size, 0)],
+                    bg.filled(),
+                )
+                + PathElement::new(
+                    vec![(0, -size), (size, 0), (0, size), (-size, 0), (0, -size)],
+                    style,
+                )
+        },
+    ))?;
     root.present()?;
     Ok(())
 }
