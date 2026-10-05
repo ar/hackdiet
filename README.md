@@ -118,6 +118,7 @@ background process, or live resize handler; run the command again after resizing
 
 The red line is the smoothed trend. Green stems connect daily weight diamonds to
 the trend. Views longer than 92 days use a subdued line for daily weights.
+Thin dashed vertical lines mark Sundays, including days without a weigh-in.
 When height is set, the right axis shows the BMI corresponding to the weight
 scale on the left; both axes describe the same plotted lines and points.
 PNG export uses the same renderer. On other terminals, inside tmux/screen, or when

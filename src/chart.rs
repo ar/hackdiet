@@ -3,8 +3,8 @@ use crate::{
     Result,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
-use chrono::NaiveDate;
-use plotters::prelude::*;
+use chrono::{Datelike, NaiveDate, Weekday};
+use plotters::{element::DashedPathElement, prelude::*};
 use std::{env, io::Write, path::Path};
 
 pub fn supported() -> bool {
@@ -27,6 +27,7 @@ pub fn render(
     let red = RGBColor(197, 55, 58);
     let green = RGBColor(43, 132, 109);
     let ink = RGBColor(42, 49, 59);
+    let sunday = ink.mix(0.3).stroke_width(1);
     let root = BitMapBackend::new(path, (1200, 600)).into_drawing_area();
     root.fill(&bg)?;
     // Give the summary its own space so it never obscures the weight curves.
@@ -81,6 +82,17 @@ pub fn render(
             ink,
         )?;
     }
+    header.draw(&DashedPathElement::new(
+        vec![(580, 37), (608, 37)],
+        4,
+        4,
+        sunday,
+    ))?;
+    header.draw(&Text::new(
+        "Sunday",
+        (620, 30),
+        ("sans-serif", 17).into_font().color(&ink),
+    ))?;
     header.draw(&PathElement::new(
         vec![(760, 37), (788, 37)],
         red.stroke_width(3),
@@ -157,6 +169,21 @@ pub fn render(
             .axis_desc_style(("sans-serif", 20))
             .axis_style(RGBColor(160, 165, 170))
             .draw()?;
+    }
+    // Mark calendar Sundays even when there is no weigh-in on that day.
+    // Draw behind the data so the weekly markers never obscure the curves.
+    for date in start
+        .iter_days()
+        .take_while(|date| *date <= end)
+        .filter(|date| date.weekday() == Weekday::Sun)
+    {
+        let offset = (date - start).num_days() as f64;
+        chart.draw_series(DashedLineSeries::new(
+            [(offset, weight_range.start), (offset, weight_range.end)],
+            4,
+            4,
+            sunday,
+        ))?;
     }
     let x = |d: &Day| (d.date - start).num_days() as f64;
     chart.draw_series(LineSeries::new(
