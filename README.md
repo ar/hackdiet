@@ -94,13 +94,16 @@ Future entries are rejected. The Markdown file looks like this:
 ```markdown
 # Weight log
 
-Height: 171 cm
+Height: 171.00 cm
 
-| Date | Weight (kg) | Note |
-|------------|-------------|------|
-| 2026-09-28 | 83.7 | missed yesterday |
-| 2026-09-29 | 83.5 | after a walk |
+| Date       | Weight (kg) | Note             |
+|------------|------------:|------------------|
+| 2026-09-28 |       83.70 | missed yesterday |
+| 2026-09-29 |       83.50 | after a walk     |
 ```
+
+Each save aligns the table for plain-text viewing with `cat`, right-aligns weights,
+and writes weight and height with two decimal places.
 
 Height is optional. Edit the table directly if you prefer; the calculations always
 use the complete history, before selecting a display period. Dates must be unique,

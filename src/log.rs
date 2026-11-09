@@ -159,15 +159,30 @@ impl Log {
             s.push_str("\n\n");
         }
         if let Some(h) = self.height {
-            s.push_str(&format!("Height: {h} cm\n\n"));
+            s.push_str(&format!("Height: {h:.2} cm\n\n"));
         }
-        s.push_str(HEADER);
-        s.push_str("\n|------------|-------------|------|\n");
-        for (date, e) in &self.entries {
+        let rows: Vec<_> = self
+            .entries
+            .iter()
+            .map(|(date, e)| (date, format!("{:.2}", e.weight), escape(&e.note)))
+            .collect();
+        let note_width = rows
+            .iter()
+            .map(|(_, _, note)| note.chars().count())
+            .max()
+            .unwrap_or(0)
+            .max(4);
+        s.push_str(&format!(
+            "| {:<10} | {:>11} | {:<note_width$} |\n",
+            "Date", "Weight (kg)", "Note"
+        ));
+        s.push_str(&format!(
+            "|------------|------------:|{}|\n",
+            "-".repeat(note_width + 2)
+        ));
+        for (date, weight, note) in rows {
             s.push_str(&format!(
-                "| {date} | {} | {} |\n",
-                e.weight,
-                escape(&e.note)
+                "| {date} | {weight:>11} | {note:<note_width$} |\n"
             ));
         }
         for line in &self.after {
@@ -212,6 +227,14 @@ mod tests {
             },
         );
         let text = log.markdown();
+        assert!(text.contains("Height: 171.00 cm\n"));
+        assert!(text.contains("| 2026-09-29 |       83.50 | a \\| b \\\\ path |\n"));
+        let widths: Vec<_> = text
+            .lines()
+            .filter(|line| line.starts_with('|'))
+            .map(str::len)
+            .collect();
+        assert!(widths.windows(2).all(|pair| pair[0] == pair[1]));
         let parsed = Log::parse(&text).unwrap();
         assert_eq!(parsed.entries[&date].note, r"a | b \ path");
         assert_eq!(parsed.height, Some(171.0));

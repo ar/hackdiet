@@ -193,7 +193,7 @@ fn run() -> Result<()> {
             log.entries.insert(date, log::Entry { weight, note });
             log.save(&file)?;
             println!(
-                "{} {date}: {weight} kg.",
+                "{} {date}: {weight:.2} kg.",
                 if replaced { "Updated" } else { "Recorded" }
             );
             None
@@ -201,7 +201,7 @@ fn run() -> Result<()> {
         Action::Height(height) => {
             log.height = Some(height);
             log.save(&file)?;
-            println!("Height saved: {height} cm.");
+            println!("Height saved: {height:.2} cm.");
             None
         }
         Action::Show(p) => p,
