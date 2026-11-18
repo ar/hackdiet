@@ -56,6 +56,25 @@ the aligned text summary, including mean BMI.
 Weight change and calorie estimates require at least two weigh-ins in the selected
 period. A first entry still produces a chart and, with height set, a BMI.
 
+## Exercise
+
+```sh
+hackdiet exercise 300 gym
+hackdiet --date 2026-09-28 exercise 620 10k run
+```
+
+Enter estimated **active kcal** for the session as a positive whole number.
+The free-text description is optional. Each command appends a workout, including
+on days with no weigh-in. To correct or remove one session, edit its row in the
+exercise table in the same Markdown file.
+
+The exercise summary shows the number of workouts, total logged kcal, and average
+logged kcal per calendar day in the selected period. The chart shows daily totals
+as bars and the trailing seven-day average as a blue line on the same dates as
+the weight plot. Each point includes that day and the six preceding calendar days,
+including dates before the view starts. A day with no logged workout contributes
+zero logged kcal. The deficit estimate still comes from the weight trend alone.
+
 ## Longer views
 
 Like `mdl`, `this` and `last` count **calendar months**:
@@ -106,7 +125,7 @@ Each save aligns the table for plain-text viewing with `cat`, right-aligns weigh
 and writes weight and height with two decimal places.
 
 Height is optional. Edit the table directly if you prefer; the calculations always
-use the complete history, before selecting a display period. Dates must be unique,
+use the complete history, before selecting a display period. Weight dates must be unique,
 weights positive, and the table must keep these three column headings. Notes may
 contain escaped pipes (`\|`). Prose outside the table is preserved. Writes replace
 the file atomically; a hidden lock file serializes writes by concurrent `hackdiet`

@@ -1,5 +1,5 @@
 use crate::{
-    stats::{self, Day},
+    stats::{self, Day, ExerciseDay},
     Result,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -19,6 +19,7 @@ pub fn supported() -> bool {
 pub fn render(
     path: &Path,
     days: &[Day],
+    exercise: &[ExerciseDay],
     start: NaiveDate,
     end: NaiveDate,
     height: Option<f64>,
@@ -28,10 +29,90 @@ pub fn render(
     let green = RGBColor(43, 132, 109);
     let ink = RGBColor(42, 49, 59);
     let sunday = ink.mix(0.3).stroke_width(1);
-    let root = BitMapBackend::new(path, (1200, 600)).into_drawing_area();
+    let combined = !days.is_empty() && !exercise.is_empty();
+    let root =
+        BitMapBackend::new(path, (1200, if combined { 840 } else { 600 })).into_drawing_area();
     root.fill(&bg)?;
+    let (weight_area, exercise_area) = root.split_vertically(if days.is_empty() { 0 } else { 600 });
+    let span = (end - start).num_days().max(1) as f64;
+    let x_range = -0.4..span + 0.4;
+    let label = |x: &f64| {
+        if *x < 0.0 || *x > (end - start).num_days() as f64 || (x - x.round()).abs() > 0.01 {
+            return String::new();
+        }
+        let date = start + chrono::Duration::days(x.round() as i64);
+        date.format(if span > 365.0 { "%b %Y" } else { "%d %b" })
+            .to_string()
+    };
+    if !exercise.is_empty() {
+        let blue = RGBColor(45, 97, 155);
+        let bar = RGBColor(157, 197, 220);
+        let (heading, panel) = exercise_area.split_vertically(if combined { 46 } else { 85 });
+        heading.draw(&Text::new(
+            format!("Exercise  |  {}", stats::exercise_summary(exercise)),
+            (24, 10),
+            ("sans-serif", 23).into_font().color(&ink),
+        ))?;
+        heading.draw(&PathElement::new(
+            [(800, 22), (835, 22)],
+            blue.stroke_width(3),
+        ))?;
+        heading.draw(&Text::new(
+            "7-day average (kcal/day)",
+            (845, 10),
+            ("sans-serif", 20).into_font().color(&ink),
+        ))?;
+        if !combined {
+            heading.draw(&Text::new(
+                stats::period_label(start, end),
+                (24, 47),
+                ("sans-serif", 22).into_font().color(&ink),
+            ))?;
+        }
+        let max = exercise
+            .iter()
+            .map(|d| d.average.max(d.kcal as f64))
+            .fold(1.0, f64::max);
+        let mut chart = ChartBuilder::on(&panel)
+            .margin(24)
+            .margin_top(8)
+            .x_label_area_size(50)
+            .y_label_area_size(75)
+            .right_y_label_area_size(if height.is_some() { 75 } else { 0 })
+            .build_cartesian_2d(x_range.clone(), 0.0..max * 1.08)?;
+        chart
+            .configure_mesh()
+            .x_labels(7)
+            .x_label_formatter(&label)
+            .y_labels(4)
+            .label_style(("sans-serif", 20))
+            .y_desc("active kcal")
+            .max_light_lines(0)
+            .disable_x_mesh()
+            .draw()?;
+        chart.draw_series(exercise.iter().enumerate().filter(|(_, d)| d.kcal > 0).map(
+            |(i, d)| {
+                let x = i as f64;
+                Rectangle::new([(x - 0.32, 0.0), (x + 0.32, d.kcal as f64)], bar.filled())
+            },
+        ))?;
+        chart.draw_series(LineSeries::new(
+            exercise
+                .iter()
+                .enumerate()
+                .map(|(i, d)| (i as f64, d.average)),
+            blue.stroke_width(3),
+        ))?;
+        if exercise.len() == 1 {
+            chart.draw_series([Circle::new((0.0, exercise[0].average), 4, blue.filled())])?;
+        }
+    }
+    if days.is_empty() {
+        root.present()?;
+        return Ok(());
+    }
     // Give the summary its own space so it never obscures the weight curves.
-    let (header, plot) = root.split_vertically(142);
+    let (header, plot) = weight_area.split_vertically(142);
     header.draw(&Text::new(
         format!("Weight  |  {}", stats::period_label(start, end)),
         (24, 28),
@@ -120,7 +201,6 @@ pub fn render(
         .flat_map(|d| [d.trend, d.weight.unwrap_or(d.trend)])
         .fold(f64::NEG_INFINITY, f64::max);
     let padding = ((max - min) * 0.18).max(0.2);
-    let span = (end - start).num_days().max(1) as f64;
     let weight_range = (min - padding)..(max + padding);
     let height_squared = height.map(|cm| (cm / 100.0).powi(2));
     let mut chart = ChartBuilder::on(&plot)
@@ -129,23 +209,12 @@ pub fn render(
         .x_label_area_size(50)
         .y_label_area_size(75)
         .right_y_label_area_size(if height.is_some() { 75 } else { 0 })
-        .build_cartesian_2d(-0.15..span + 0.15, weight_range.clone())?
+        .build_cartesian_2d(x_range.clone(), weight_range.clone())?
         .set_secondary_coord(
-            -0.15..span + 0.15,
+            x_range.clone(),
             (weight_range.start / height_squared.unwrap_or(1.0))
                 ..(weight_range.end / height_squared.unwrap_or(1.0)),
         );
-    let label = |x: &f64| {
-        if *x < 0.0 || *x > span || (x - x.round()).abs() > 0.01 {
-            return String::new();
-        }
-        let date = start + chrono::Duration::days(x.round() as i64);
-        if span > 365.0 {
-            date.format("%b %Y").to_string()
-        } else {
-            date.format("%d %b").to_string()
-        }
-    };
     chart
         .configure_mesh()
         .x_labels(7)
@@ -248,14 +317,16 @@ fn transmit(out: &mut impl Write, png: &[u8], columns: u16, rows: u16) -> std::i
     Ok(())
 }
 
-pub fn display(png: &[u8]) -> Result<()> {
+pub fn display(png: &[u8], combined: bool) -> Result<()> {
     let (width, height) = terminal_size::terminal_size()
         .map(|(w, h)| (w.0, h.0))
         .unwrap_or((100, 30));
     let columns = width.saturating_sub(1).clamp(1, 120);
-    let rows = (columns / 4)
+    // Terminal cells are roughly twice as tall as they are wide.
+    let image_height = if combined { 840 } else { 600 };
+    let rows = (columns * (image_height / 120) / 20)
         .max(1)
-        .min(height.saturating_sub(6).clamp(1, 24));
+        .min(height.saturating_sub(6).max(1));
     let mut out = std::io::stdout().lock();
     // Reserve space first, including at the bottom of the screen, then place the
     // image there and leave the shell prompt below it. No raw mode or event loop.

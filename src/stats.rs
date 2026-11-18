@@ -37,6 +37,51 @@ pub fn days(entries: &BTreeMap<NaiveDate, Entry>) -> Vec<Day> {
     out
 }
 
+pub struct ExerciseDay {
+    pub kcal: u64,
+    pub sessions: usize,
+    pub average: f64,
+}
+
+pub fn exercise_days(
+    workouts: &BTreeMap<NaiveDate, Vec<crate::log::Workout>>,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Vec<ExerciseDay> {
+    let first = start - chrono::Duration::days(6);
+    if workouts.range(..=end).next_back().is_none() {
+        return Vec::new();
+    }
+    let mut week = [0; 7];
+    let mut total = 0;
+    let mut days = Vec::new();
+    for (i, date) in first.iter_days().take_while(|d| *d <= end).enumerate() {
+        let sessions = workouts.get(&date).map(Vec::as_slice).unwrap_or_default();
+        let kcal = sessions.iter().map(|w| u64::from(w.kcal)).sum();
+        total -= week[i % 7];
+        week[i % 7] = kcal;
+        total += kcal;
+        if date >= start {
+            days.push(ExerciseDay {
+                kcal,
+                sessions: sessions.len(),
+                average: total as f64 / 7.0,
+            });
+        }
+    }
+    days
+}
+
+pub fn exercise_summary(days: &[ExerciseDay]) -> String {
+    let count: usize = days.iter().map(|d| d.sessions).sum();
+    let kcal: u64 = days.iter().map(|d| d.kcal).sum();
+    format!(
+        "{count} workout{} · {kcal} kcal logged · {:.0} kcal/day",
+        if count == 1 { "" } else { "s" },
+        kcal as f64 / days.len() as f64
+    )
+}
+
 pub fn slope(days: &[Day]) -> Option<f64> {
     if days.iter().filter(|d| d.weight.is_some()).count() < 2 {
         return None;
@@ -138,6 +183,24 @@ pub fn print_summary(days: &[Day], height: Option<f64>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn exercise_average_carries_in_and_expires_across_months() {
+        let start = NaiveDate::from_ymd_opt(2024, 3, 1).unwrap();
+        let workouts = BTreeMap::from([(
+            start.pred_opt().unwrap(),
+            vec![crate::log::Workout {
+                kcal: 350,
+                note: String::new(),
+            }],
+        )]);
+        let days = exercise_days(&workouts, start, start + chrono::Duration::days(6));
+        assert_eq!(days.len(), 7);
+        assert!(days.iter().all(|d| d.sessions == 0 && d.kcal == 0));
+        assert_eq!(days[0].average, 50.0);
+        assert_eq!(days[5].average, 50.0);
+        assert_eq!(days[6].average, 0.0);
+    }
+
     #[test]
     fn smoothing_carries_across_gaps_and_months() {
         let mut entries = BTreeMap::new();

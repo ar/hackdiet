@@ -15,6 +15,7 @@ Usage:
   hackdiet                      Show the latest seven calendar days
   hackdiet this [N]              Current month and N−1 preceding months
   hackdiet last [N]              N complete months before this month
+  hackdiet exercise 300 [note...] Append a workout with estimated active kcal
   hackdiet height 171            Save height in centimeters for BMI
 
 Options (before the weight/note, or with a viewing command):
@@ -33,6 +34,7 @@ enum Action {
     Show(Option<(bool, u32)>),
     Record(f64, Option<String>),
     Height(f64),
+    Exercise(log::Workout),
 }
 
 struct Options {
@@ -79,6 +81,18 @@ fn parse(args: Vec<String>) -> Result<Options> {
             }
             "--no-graph" => opt.no_graph = true,
             "--kitty" => opt.kitty = true,
+            "exercise" if words.is_empty() => {
+                let kcal = log::calories(
+                    args.get(i + 1)
+                        .ok_or("exercise requires estimated active kcal")?,
+                )?;
+                let note = args[i + 2..].join(" ");
+                if note.chars().any(char::is_control) {
+                    return Err("Descriptions cannot contain control characters".into());
+                }
+                opt.action = Action::Exercise(log::Workout { kcal, note });
+                return Ok(opt);
+            }
             s if words.is_empty() && s.parse::<f64>().is_ok() => {
                 let weight = positive(s, "Weight in kilograms", 1000.0)?;
                 let note = (i + 1 < args.len()).then(|| args[i + 1..].join(" "));
@@ -96,26 +110,30 @@ fn parse(args: Vec<String>) -> Result<Options> {
         }
         i += 1;
     }
-    opt.action = match words.first().map(String::as_str) {
-        None => Action::Show(None),
-        Some("this" | "last") if words.len() <= 2 => {
-            let n = words
-                .get(1)
-                .map(|v| v.parse::<u32>())
-                .transpose()?
-                .unwrap_or(1);
-            if n == 0 || n > 1200 {
-                return Err("Month count must be between 1 and 1200".into());
+    opt.action =
+        match words.first().map(String::as_str) {
+            None => Action::Show(None),
+            Some("this" | "last") if words.len() <= 2 => {
+                let n = words
+                    .get(1)
+                    .map(|v| v.parse::<u32>())
+                    .transpose()?
+                    .unwrap_or(1);
+                if n == 0 || n > 1200 {
+                    return Err("Month count must be between 1 and 1200".into());
+                }
+                Action::Show(Some((words[0] == "this", n)))
             }
-            Action::Show(Some((words[0] == "this", n)))
-        }
-        Some("height") if words.len() == 2 => {
-            Action::Height(positive(&words[1], "Height in centimeters", 300.0)?)
-        }
-        _ => return Err("Expected a weight, this [N], last [N], or height CM; see --help".into()),
-    };
+            Some("height") if words.len() == 2 => {
+                Action::Height(positive(&words[1], "Height in centimeters", 300.0)?)
+            }
+            _ => return Err(
+                "Expected a weight, this [N], last [N], height CM, or exercise KCAL; see --help"
+                    .into(),
+            ),
+        };
     if opt.date.is_some() {
-        return Err("--date requires a weight entry".into());
+        return Err("--date requires a weight or exercise entry".into());
     }
     if opt.no_graph && opt.png.is_some() {
         return Err("--png and --no-graph cannot be combined".into());
@@ -151,7 +169,7 @@ fn run() -> Result<()> {
     let today = Local::now().date_naive();
     let date = opt.date.unwrap_or(today);
     if date > today {
-        return Err("Cannot record a future weight".into());
+        return Err("Cannot record a future entry".into());
     }
     // Resolve existing symlinks so atomic replacement updates their target.
     let file = resolve_path(&opt.file)?;
@@ -178,8 +196,13 @@ fn run() -> Result<()> {
         None
     };
     let mut log = log::Log::read(&file)?;
-    if log.entries.keys().any(|d| *d > today) {
-        return Err("The log contains a future weight; correct it before continuing".into());
+    if log
+        .entries
+        .keys()
+        .chain(log.workouts.keys())
+        .any(|d| *d > today)
+    {
+        return Err("The log contains a future entry; correct it before continuing".into());
     }
     let selection = match opt.action {
         Action::Record(weight, note) => {
@@ -198,6 +221,13 @@ fn run() -> Result<()> {
             );
             None
         }
+        Action::Exercise(workout) => {
+            let kcal = workout.kcal;
+            log.workouts.entry(date).or_default().push(workout);
+            log.save(&file)?;
+            println!("Recorded workout on {date}: {kcal} active kcal.");
+            None
+        }
         Action::Height(height) => {
             log.height = Some(height);
             log.save(&file)?;
@@ -213,18 +243,23 @@ fn run() -> Result<()> {
         .into_iter()
         .filter(|d| d.date >= start && d.date <= end)
         .collect();
+    let exercise = stats::exercise_days(&log.workouts, start, end);
+    let has_data = !selected.is_empty() || !exercise.is_empty();
     let graphics = !opt.no_graph
-        && !selected.is_empty()
+        && has_data
         && std::io::stdout().is_terminal()
         && (opt.kitty || chart::supported());
     if !graphics {
         println!("{}", stats::period_label(start, end));
         stats::print_summary(&selected, log.height);
+        if !exercise.is_empty() {
+            println!("{:<19} {}", "Exercise", stats::exercise_summary(&exercise));
+        }
     }
-    if !opt.no_graph && !selected.is_empty() {
+    if !opt.no_graph && has_data {
         if graphics || opt.png.is_some() {
             let image = tempfile::Builder::new().suffix(".png").tempfile()?;
-            chart::render(image.path(), &selected, start, end, log.height)?;
+            chart::render(image.path(), &selected, &exercise, start, end, log.height)?;
             if let Some(path) = opt.png {
                 let path = resolve_path(&path)?;
                 let export = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;
@@ -233,10 +268,13 @@ fn run() -> Result<()> {
                 println!("Chart saved: {}", path.display());
             }
             if graphics {
-                chart::display(&std::fs::read(image.path())?)?;
+                chart::display(
+                    &std::fs::read(image.path())?,
+                    !selected.is_empty() && !exercise.is_empty(),
+                )?;
             }
         }
-        if !graphics {
+        if !graphics && !selected.is_empty() {
             println!("\nDate          Weight    Trend");
             for day in selected.iter().filter(|d| d.weight.is_some()) {
                 println!(

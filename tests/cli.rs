@@ -98,3 +98,39 @@ fn read_only_empty_log_does_not_create_files() {
     assert!(ok(dir.path(), &[]).contains("No weight entries"));
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
 }
+
+#[test]
+fn workouts_append_independently_of_weight_and_render_in_both_views() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    let text = ok(
+        dir,
+        &["--png", "exercise.png", "exercise", "300", r"gym | A\B"],
+    );
+    assert!(text.contains("No weight entries"));
+    assert!(text.contains("1 workout · 300 kcal logged · 43 kcal/day"));
+    assert!(dir.join("exercise.png").exists());
+
+    let yesterday = (Local::now().date_naive() - Duration::days(1)).to_string();
+    ok(dir, &["--date", &yesterday, "84"]);
+    let baseline = ok(dir, &["83"]);
+    let deficit = baseline
+        .lines()
+        .find(|s| s.starts_with("Estimated deficit"))
+        .unwrap();
+    let text = ok(
+        dir,
+        &["--png", "combined.png", "exercise", "600", "10k", "run"],
+    );
+    assert!(text.contains(deficit));
+    assert!(text.contains("2 workouts · 900 kcal logged · 129 kcal/day"));
+    let chart = fs::read(dir.join("combined.png")).unwrap();
+    assert_eq!(u32::from_be_bytes(chart[20..24].try_into().unwrap()), 840);
+    let log = fs::read_to_string(dir.join("hackdiet.md")).unwrap();
+    assert!(log.contains(r"gym \| A\\B"));
+    assert!(log.contains("10k run"));
+    for kcal in ["0", "-1", "NaN", ""] {
+        assert!(!run(dir, &["exercise", kcal]).status.success());
+    }
+    assert_eq!(log, fs::read_to_string(dir.join("hackdiet.md")).unwrap());
+}

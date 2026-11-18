@@ -2,6 +2,7 @@ use crate::{positive, Result};
 use chrono::NaiveDate;
 use std::{collections::BTreeMap, fs, io::Write, path::Path};
 
+#[cfg(test)]
 const HEADER: &str = "| Date | Weight (kg) | Note |";
 
 #[derive(Clone, Debug)]
@@ -10,17 +11,36 @@ pub struct Entry {
     pub note: String,
 }
 
+#[derive(Debug)]
+pub struct Workout {
+    pub kcal: u32,
+    pub note: String,
+}
+
+enum Section {
+    Text(String),
+    Height,
+    Weight,
+    Exercise,
+}
+
 pub struct Log {
     pub entries: BTreeMap<NaiveDate, Entry>,
+    pub workouts: BTreeMap<NaiveDate, Vec<Workout>>,
     pub height: Option<f64>,
-    // Preserve prose surrounding the managed table.
-    before: Vec<String>,
-    after: Vec<String>,
+    layout: Vec<Section>,
+}
+
+pub fn calories(s: &str) -> Result<u32> {
+    s.parse::<u32>()
+        .ok()
+        .filter(|n| *n > 0)
+        .ok_or_else(|| "Exercise kcal must be a positive whole number".into())
 }
 
 fn cells(line: &str) -> Result<Vec<String>> {
     let line = line.trim();
-    if !line.starts_with('|') || !line.ends_with('|') {
+    if line.len() < 2 || !line.starts_with('|') || !line.ends_with('|') {
         return Err("Table rows must start and end with |".into());
     }
     let mut cells = Vec::new();
@@ -56,8 +76,15 @@ impl Log {
     fn parse(text: &str) -> Result<Self> {
         let lines: Vec<String> = text.lines().map(str::to_owned).collect();
         let mut height = None;
-        for line in &lines {
-            if let Some(h) = line.strip_prefix("Height:") {
+        let mut entries = BTreeMap::new();
+        let mut workouts: BTreeMap<NaiveDate, Vec<Workout>> = BTreeMap::new();
+        let mut layout = Vec::new();
+        let mut found_weight = false;
+        let mut found_exercise = false;
+        let mut other_table = false;
+        let mut start = 0;
+        while start < lines.len() {
+            if let Some(h) = lines[start].strip_prefix("Height:") {
                 if height.is_some() {
                     return Err("Multiple Height settings in log".into());
                 }
@@ -67,131 +94,150 @@ impl Log {
                     .ok_or("Height must be written as Height: 171 cm")?
                     .trim();
                 height = Some(positive(value, "Height in centimeters", 300.0)?);
+                layout.push(Section::Height);
+                start += 1;
+                continue;
             }
-        }
-        let headers: Vec<_> = lines
-            .iter()
-            .enumerate()
-            .filter_map(|(i, l)| {
-                cells(l)
-                    .ok()
-                    .filter(|c| c == &["Date", "Weight (kg)", "Note"])
-                    .map(|_| i)
-            })
-            .collect();
-        if headers.len() > 1 {
-            return Err("Multiple weight tables in log".into());
-        }
-        let Some(&start) = headers.first() else {
-            if lines.iter().any(|l| l.trim_start().starts_with('|')) {
-                return Err(format!("Unrecognized table; expected {HEADER}").into());
-            }
-            return Ok(Self {
-                entries: BTreeMap::new(),
-                height,
-                before: lines,
-                after: Vec::new(),
-            });
-        };
-        let sep = lines
-            .get(start + 1)
-            .ok_or("Missing Markdown table separator")?;
-        let sep = cells(sep)?;
-        if sep.len() != 3
-            || sep.iter().any(|c| {
-                let s = c.trim_matches(':');
-                s.len() < 3 || !s.chars().all(|c| c == '-')
-            })
-        {
-            return Err("Invalid Markdown table separator".into());
-        }
-        let mut end = start + 2;
-        let mut entries = BTreeMap::new();
-        while end < lines.len() && lines[end].trim_start().starts_with('|') {
-            let row = cells(&lines[end])?;
-            if row.len() != 3 {
-                return Err(format!(
-                    "Line {}: expected three columns; escape note pipes as \\|",
-                    end + 1
-                )
-                .into());
-            }
-            let date = NaiveDate::parse_from_str(&row[0], "%Y-%m-%d")
-                .map_err(|e| format!("Line {}: invalid date: {e}", end + 1))?;
-            let weight = positive(&row[1], "Weight in kilograms", 1000.0)?;
-            if row[2].chars().any(char::is_control) {
-                return Err("Notes cannot contain control characters".into());
-            }
-            if entries
-                .insert(
-                    date,
-                    Entry {
-                        weight,
-                        note: row[2].clone(),
-                    },
-                )
-                .is_some()
+            let header = cells(&lines[start]).unwrap_or_default();
+            let exercise = if header == ["Date", "Weight (kg)", "Note"] {
+                if found_weight {
+                    return Err("Multiple weight tables in log".into());
+                }
+                found_weight = true;
+                layout.push(Section::Weight);
+                false
+            } else if header == ["Date", "Active kcal", "Description"] {
+                if found_exercise {
+                    return Err("Multiple exercise tables in log".into());
+                }
+                found_exercise = true;
+                layout.push(Section::Exercise);
+                true
+            } else {
+                other_table |= lines[start].trim_start().starts_with('|');
+                layout.push(Section::Text(lines[start].clone()));
+                start += 1;
+                continue;
+            };
+            let sep = lines
+                .get(start + 1)
+                .ok_or("Missing Markdown table separator")?;
+            let sep = cells(sep)?;
+            if sep.len() != 3
+                || sep.iter().any(|c| {
+                    let s = c.trim_matches(':');
+                    s.len() < 3 || !s.chars().all(|c| c == '-')
+                })
             {
-                return Err(format!("Duplicate date {date}; keep one entry per day").into());
+                return Err("Invalid Markdown table separator".into());
             }
-            end += 1;
+            let mut end = start + 2;
+            while end < lines.len() && lines[end].trim_start().starts_with('|') {
+                let row = cells(&lines[end])?;
+                if row.len() != 3 {
+                    return Err(format!(
+                        "Line {}: expected three columns; escape note pipes as \\|",
+                        end + 1
+                    )
+                    .into());
+                }
+                let date = NaiveDate::parse_from_str(&row[0], "%Y-%m-%d")
+                    .map_err(|e| format!("Line {}: invalid date: {e}", end + 1))?;
+                if row[2].chars().any(char::is_control) {
+                    return Err("Notes cannot contain control characters".into());
+                }
+                if exercise {
+                    workouts.entry(date).or_default().push(Workout {
+                        kcal: calories(&row[1])?,
+                        note: row[2].clone(),
+                    });
+                } else if entries
+                    .insert(
+                        date,
+                        Entry {
+                            weight: positive(&row[1], "Weight in kilograms", 1000.0)?,
+                            note: row[2].clone(),
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(format!("Duplicate date {date}; keep one entry per day").into());
+                }
+                end += 1;
+            }
+            start = end;
+        }
+        if !found_weight && !found_exercise && other_table {
+            return Err("Unrecognized table in log".into());
+        }
+        if !found_weight {
+            while matches!(layout.last(), Some(Section::Text(s)) if s.is_empty()) {
+                layout.pop();
+            }
+            if !layout.is_empty() {
+                layout.push(Section::Text(String::new()));
+            }
+            layout.push(Section::Weight);
         }
         Ok(Self {
             entries,
+            workouts,
             height,
-            before: lines[..start].to_vec(),
-            after: lines[end..].to_vec(),
+            layout,
         })
     }
 
     fn markdown(&self) -> String {
-        let mut before: Vec<_> = self
-            .before
-            .iter()
-            .filter(|l| !l.starts_with("Height:"))
-            .cloned()
-            .collect();
-        while before.last().is_some_and(|s| s.trim().is_empty()) {
-            before.pop();
-        }
-        let mut s = before.join("\n");
-        if !s.is_empty() {
-            s.push_str("\n\n");
-        }
-        if let Some(h) = self.height {
-            s.push_str(&format!("Height: {h:.2} cm\n\n"));
-        }
-        let rows: Vec<_> = self
-            .entries
-            .iter()
-            .map(|(date, e)| (date, format!("{:.2}", e.weight), escape(&e.note)))
-            .collect();
-        let note_width = rows
-            .iter()
-            .map(|(_, _, note)| note.chars().count())
-            .max()
-            .unwrap_or(0)
-            .max(4);
-        s.push_str(&format!(
-            "| {:<10} | {:>11} | {:<note_width$} |\n",
-            "Date", "Weight (kg)", "Note"
-        ));
-        s.push_str(&format!(
-            "|------------|------------:|{}|\n",
-            "-".repeat(note_width + 2)
-        ));
-        for (date, weight, note) in rows {
-            s.push_str(&format!(
-                "| {date} | {weight:>11} | {note:<note_width$} |\n"
-            ));
-        }
-        for line in &self.after {
-            if !line.starts_with("Height:") {
-                s.push_str(line);
-                s.push('\n');
+        let mut s = String::new();
+        let mut exercise_written = false;
+        for section in &self.layout {
+            match section {
+                Section::Text(line) => {
+                    s.push_str(line);
+                    s.push('\n');
+                }
+                Section::Height => {
+                    if let Some(h) = self.height {
+                        s.push_str(&format!("Height: {h:.2} cm\n"));
+                    }
+                }
+                Section::Weight => {
+                    if let Some(h) = self
+                        .height
+                        .filter(|_| !self.layout.iter().any(|s| matches!(s, Section::Height)))
+                    {
+                        s.push_str(&format!("Height: {h:.2} cm\n\n"));
+                    }
+                    self.write_weights(&mut s);
+                }
+                Section::Exercise => {
+                    self.write_exercise(&mut s);
+                    exercise_written = true;
+                }
             }
         }
+        if !exercise_written && !self.workouts.is_empty() {
+            s.push_str("\n## Exercise\n\n");
+            self.write_exercise(&mut s);
+        }
         s
+    }
+
+    fn write_exercise(&self, s: &mut String) {
+        let rows = self.workouts.iter().flat_map(|(date, sessions)| {
+            sessions
+                .iter()
+                .map(move |w| (date, w.kcal.to_string(), escape(&w.note)))
+        });
+        write_table(s, "Active kcal", "Description", rows);
+    }
+
+    fn write_weights(&self, s: &mut String) {
+        let rows = self
+            .entries
+            .iter()
+            .map(|(date, e)| (date, format!("{:.2}", e.weight), escape(&e.note)));
+        write_table(s, "Weight (kg)", "Note", rows);
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -210,6 +256,34 @@ impl Log {
     }
 }
 
+fn write_table<'a>(
+    s: &mut String,
+    value: &str,
+    description: &str,
+    rows: impl IntoIterator<Item = (&'a NaiveDate, String, String)>,
+) {
+    let rows: Vec<_> = rows.into_iter().collect();
+    let note_width = rows
+        .iter()
+        .map(|(_, _, note)| note.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(description.len());
+    s.push_str(&format!(
+        "| {:<10} | {:>11} | {:<note_width$} |\n",
+        "Date", value, description
+    ));
+    s.push_str(&format!(
+        "|------------|------------:|{}|\n",
+        "-".repeat(note_width + 2)
+    ));
+    for (date, weight, note) in rows {
+        s.push_str(&format!(
+            "| {date} | {weight:>11} | {note:<note_width$} |\n"
+        ));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,7 +291,8 @@ mod tests {
     fn roundtrip_escapes_and_preserves_prose_and_height() {
         let mut log = Log::parse("# My log\n\nPersonal notes.\n").unwrap();
         log.height = Some(171.0);
-        log.after = vec!["".into(), "## Other notes".into(), "Keep me.".into()];
+        log.layout
+            .extend(["", "## Other notes", "Keep me."].map(|s| Section::Text(s.into())));
         let date = NaiveDate::from_ymd_opt(2026, 9, 29).unwrap();
         log.entries.insert(
             date,
