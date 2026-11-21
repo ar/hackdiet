@@ -1,11 +1,12 @@
 use crate::{
+    log::{Log, Metric},
     stats::{self, Day, ExerciseDay},
     Result,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use chrono::{Datelike, NaiveDate, Weekday};
 use plotters::{element::DashedPathElement, prelude::*};
-use std::{env, io::Write, path::Path};
+use std::{collections::BTreeMap, env, io::Write, path::Path};
 
 pub fn supported() -> bool {
     // Multiplexers need their own passthrough handling; don't emit raw images there.
@@ -16,24 +17,133 @@ pub fn supported() -> bool {
         || env::var("TERM").is_ok_and(|s| s == "xterm-ghostty" || s == "xterm-kitty")
 }
 
+pub struct Timeline<'a> {
+    start: NaiveDate,
+    end: NaiveDate,
+    pub groups: BTreeMap<(i32, i32), Vec<(usize, &'a Metric)>>,
+    pub events: Vec<(NaiveDate, &'a str)>,
+}
+
+impl<'a> Timeline<'a> {
+    pub fn new(log: &'a Log, start: NaiveDate, end: NaiveDate) -> Self {
+        let mut groups: BTreeMap<_, Vec<_>> = BTreeMap::new();
+        let mut style_indices = BTreeMap::<_, usize>::new();
+        for metric in log.metrics.values() {
+            let next_style = style_indices.entry((metric.min, metric.max)).or_default();
+            if metric.ratings.range(start..=end).next().is_some() {
+                groups
+                    .entry((metric.min, metric.max))
+                    .or_default()
+                    .push((*next_style, metric));
+            }
+            *next_style += 1;
+        }
+        let events = log
+            .events
+            .range(start..=end)
+            .flat_map(|(&date, labels)| labels.iter().map(move |label| (date, label.as_str())))
+            .collect();
+        Self {
+            start,
+            end,
+            groups,
+            events,
+        }
+    }
+
+    fn x(&self, date: NaiveDate) -> f64 {
+        (date - self.start).num_days() as f64
+    }
+
+    fn guides(
+        &self,
+        chart: &mut ChartContext<
+            '_,
+            BitMapBackend<'_>,
+            Cartesian2d<
+                plotters::coord::types::RangedCoordf64,
+                plotters::coord::types::RangedCoordf64,
+            >,
+        >,
+        low: f64,
+        high: f64,
+    ) -> Result<()> {
+        for date in self
+            .start
+            .iter_days()
+            .take_while(|d| *d <= self.end)
+            .filter(|d| d.weekday() == Weekday::Sun)
+        {
+            let x = self.x(date);
+            chart.draw_series(DashedLineSeries::new(
+                [(x, low), (x, high)],
+                4,
+                4,
+                RGBColor(42, 49, 59).mix(0.3).stroke_width(1),
+            ))?;
+        }
+        let mut previous = None;
+        for &(date, _) in &self.events {
+            if previous == Some(date) {
+                continue;
+            }
+            previous = Some(date);
+            let x = self.x(date);
+            chart.draw_series(DashedLineSeries::new(
+                [(x, low), (x, high)],
+                8,
+                3,
+                EVENT_COLOR.stroke_width(2),
+            ))?;
+        }
+        Ok(())
+    }
+}
+
+const EVENT_COLOR: RGBColor = RGBColor(142, 93, 37);
+
 pub fn render(
     path: &Path,
     days: &[Day],
     exercise: &[ExerciseDay],
-    start: NaiveDate,
-    end: NaiveDate,
+    timeline: &Timeline,
     height: Option<f64>,
-) -> Result<()> {
+) -> Result<u32> {
+    let (start, end) = (timeline.start, timeline.end);
     let bg = RGBColor(250, 250, 247);
     let red = RGBColor(197, 55, 58);
     let green = RGBColor(43, 132, 109);
     let ink = RGBColor(42, 49, 59);
     let sunday = ink.mix(0.3).stroke_width(1);
     let combined = !days.is_empty() && !exercise.is_empty();
-    let root =
-        BitMapBackend::new(path, (1200, if combined { 840 } else { 600 })).into_drawing_area();
+    let weight_height = if days.is_empty() { 0 } else { 600 };
+    let exercise_height = if combined {
+        240
+    } else if exercise.is_empty() {
+        0
+    } else {
+        600
+    };
+    let event_height = if timeline.events.is_empty() {
+        0
+    } else {
+        50 + timeline.events.len() as u32 * 28
+    };
+    let metric_height = |count: usize| 240 + 30 * count as u32;
+    let image_height = event_height
+        + weight_height
+        + exercise_height
+        + timeline
+            .groups
+            .values()
+            .map(|group| metric_height(group.len()))
+            .sum::<u32>();
+    let root = BitMapBackend::new(path, (1200, image_height)).into_drawing_area();
     root.fill(&bg)?;
-    let (weight_area, exercise_area) = root.split_vertically(if days.is_empty() { 0 } else { 600 });
+    let (events, panels) = root.split_vertically(event_height);
+    let (weight_area, panels) = panels.split_vertically(weight_height);
+    let (mut metrics_area, exercise_area) =
+        panels.split_vertically(panels.dim_in_pixel().1 - exercise_height);
     let span = (end - start).num_days().max(1) as f64;
     let x_range = -0.4..span + 0.4;
     let label = |x: &f64| {
@@ -44,6 +154,104 @@ pub fn render(
         date.format(if span > 365.0 { "%b %Y" } else { "%d %b" })
             .to_string()
     };
+    let right_axis = if height.is_some() { 75 } else { 0 };
+    if !timeline.events.is_empty() {
+        events.draw(&Text::new(
+            format!("Events  |  {}", stats::period_label(start, end)),
+            (24, 12),
+            ("sans-serif", 23).into_font().color(&ink),
+        ))?;
+        let rows = timeline.events.len() as i32;
+        let (_, strip) = events.split_vertically(44);
+        let chart = ChartBuilder::on(&strip)
+            .margin_left(24)
+            .margin_right(24)
+            .y_label_area_size(75)
+            .right_y_label_area_size(right_axis)
+            .build_cartesian_2d(x_range.clone(), 0..rows)?;
+        for (i, &(date, name)) in timeline.events.iter().enumerate() {
+            let x = chart
+                .plotting_area()
+                .map_coordinate(&(timeline.x(date), 0))
+                .0;
+            let y = 14 + i as i32 * 28;
+            let style = ("sans-serif", 19).into_font().color(&EVENT_COLOR);
+            let caption = format!("{} · {name}", date.format("%d %b"));
+            let width = strip.estimate_text_size(&caption, &style)?.0 as i32;
+            let left = if x + 8 + width < 1190 {
+                x + 8
+            } else {
+                (x - width - 8).max(4)
+            };
+            strip.draw(&Circle::new((x, y), 4, EVENT_COLOR.filled()))?;
+            strip.draw(&Text::new(caption, (left, y - 9), style))?;
+        }
+    }
+    for (&(min, max), group) in &timeline.groups {
+        let (area, rest) = metrics_area.split_vertically(metric_height(group.len()));
+        metrics_area = rest;
+        let (heading, panel) = area.split_vertically(30 * group.len() as u32 + 12);
+        let mut chart = ChartBuilder::on(&panel)
+            .margin(24)
+            .margin_top(8)
+            .x_label_area_size(50)
+            .y_label_area_size(75)
+            .right_y_label_area_size(right_axis)
+            .build_cartesian_2d(x_range.clone(), f64::from(min)..f64::from(max))?;
+        chart
+            .configure_mesh()
+            .x_labels(7)
+            .x_label_formatter(&label)
+            .y_labels(6)
+            .y_desc("rating")
+            .label_style(("sans-serif", 20))
+            .disable_x_mesh()
+            .max_light_lines(0)
+            .draw()?;
+        timeline.guides(&mut chart, min.into(), max.into())?;
+        let colors = [
+            RGBColor(30, 109, 155),
+            RGBColor(155, 71, 132),
+            RGBColor(34, 128, 96),
+            RGBColor(178, 94, 45),
+        ];
+        for (i, &(style_index, metric)) in group.iter().enumerate() {
+            let color = colors
+                .get(style_index)
+                .map(Color::to_rgba)
+                .unwrap_or_else(|| Palette99::pick(style_index).to_rgba());
+            let y = 19 + i as i32 * 30;
+            let (latest, (value, _)) = metric.ratings.range(start..=end).next_back().unwrap();
+            let caption = format!(
+                "{}  ·  {min}–{max}   |   {value} on {}",
+                metric.name,
+                latest.format("%d %b %Y")
+            );
+            heading.draw(&Text::new(
+                caption,
+                (52, y - 10),
+                ("sans-serif", 21).into_font().color(&ink),
+            ))?;
+            let points = metric
+                .ratings
+                .range(start..=end)
+                .map(|(&date, (value, _))| (timeline.x(date), f64::from(*value)));
+            for (a, b) in points
+                .clone()
+                .zip(points.clone().skip(1))
+                .filter(|(a, b)| b.0 - a.0 == 1.0)
+            {
+                chart.draw_series([PathElement::new([a, b], color.stroke_width(2))])?;
+            }
+            if style_index % 2 == 0 {
+                heading.draw(&Circle::new((32, y), 6, color.stroke_width(2)))?;
+                chart.draw_series(points.map(|p| Circle::new(p, 6, color.stroke_width(2))))?;
+            } else {
+                heading.draw(&TriangleMarker::new((32, y), 5, color.filled()))?;
+                chart.draw_series(points.map(|p| TriangleMarker::new(p, 5, color.filled())))?;
+            }
+        }
+    }
     if !exercise.is_empty() {
         let blue = RGBColor(45, 97, 155);
         let bar = RGBColor(157, 197, 220);
@@ -78,7 +286,7 @@ pub fn render(
             .margin_top(8)
             .x_label_area_size(50)
             .y_label_area_size(75)
-            .right_y_label_area_size(if height.is_some() { 75 } else { 0 })
+            .right_y_label_area_size(right_axis)
             .build_cartesian_2d(x_range.clone(), 0.0..max * 1.08)?;
         chart
             .configure_mesh()
@@ -96,6 +304,7 @@ pub fn render(
                 Rectangle::new([(x - 0.32, 0.0), (x + 0.32, d.kcal as f64)], bar.filled())
             },
         ))?;
+        timeline.guides(&mut chart, 0.0, max * 1.08)?;
         chart.draw_series(LineSeries::new(
             exercise
                 .iter()
@@ -109,7 +318,7 @@ pub fn render(
     }
     if days.is_empty() {
         root.present()?;
-        return Ok(());
+        return Ok(image_height);
     }
     // Give the summary its own space so it never obscures the weight curves.
     let (header, plot) = weight_area.split_vertically(142);
@@ -208,7 +417,7 @@ pub fn render(
         .margin_top(8)
         .x_label_area_size(50)
         .y_label_area_size(75)
-        .right_y_label_area_size(if height.is_some() { 75 } else { 0 })
+        .right_y_label_area_size(right_axis)
         .build_cartesian_2d(x_range.clone(), weight_range.clone())?
         .set_secondary_coord(
             x_range.clone(),
@@ -239,21 +448,7 @@ pub fn render(
             .axis_style(RGBColor(160, 165, 170))
             .draw()?;
     }
-    // Mark calendar Sundays even when there is no weigh-in on that day.
-    // Draw behind the data so the weekly markers never obscure the curves.
-    for date in start
-        .iter_days()
-        .take_while(|date| *date <= end)
-        .filter(|date| date.weekday() == Weekday::Sun)
-    {
-        let offset = (date - start).num_days() as f64;
-        chart.draw_series(DashedLineSeries::new(
-            [(offset, weight_range.start), (offset, weight_range.end)],
-            4,
-            4,
-            sunday,
-        ))?;
-    }
+    timeline.guides(&mut chart, weight_range.start, weight_range.end)?;
     let x = |d: &Day| (d.date - start).num_days() as f64;
     chart.draw_series(LineSeries::new(
         days.iter().map(|d| (x(d), d.trend)),
@@ -295,7 +490,7 @@ pub fn render(
         },
     ))?;
     root.present()?;
-    Ok(())
+    Ok(image_height)
 }
 
 fn transmit(out: &mut impl Write, png: &[u8], columns: u16, rows: u16) -> std::io::Result<()> {
@@ -317,16 +512,17 @@ fn transmit(out: &mut impl Write, png: &[u8], columns: u16, rows: u16) -> std::i
     Ok(())
 }
 
-pub fn display(png: &[u8], combined: bool) -> Result<()> {
+pub fn display(png: &[u8], image_height: u32) -> Result<()> {
     let (width, height) = terminal_size::terminal_size()
         .map(|(w, h)| (w.0, h.0))
         .unwrap_or((100, 30));
-    let columns = width.saturating_sub(1).clamp(1, 120);
+    // Fit both dimensions while preserving the aspect ratio on tall timelines.
     // Terminal cells are roughly twice as tall as they are wide.
-    let image_height = if combined { 840 } else { 600 };
-    let rows = (columns * (image_height / 120) / 20)
-        .max(1)
-        .min(height.saturating_sub(6).max(1));
+    let available_rows = u64::from(height.saturating_sub(6).max(1));
+    let image_height = u64::from(image_height);
+    let columns = u64::from(width.saturating_sub(1).clamp(1, 120))
+        .min((available_rows * 2400 / image_height).max(1)) as u16;
+    let rows = (u64::from(columns) * image_height / 2400).clamp(1, available_rows) as u16;
     let mut out = std::io::stdout().lock();
     // Reserve space first, including at the bottom of the screen, then place the
     // image there and leave the shell prompt below it. No raw mode or event loop.

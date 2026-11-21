@@ -16,6 +16,9 @@ Usage:
   hackdiet this [N]              Current month and N−1 preceding months
   hackdiet last [N]              N complete months before this month
   hackdiet exercise 300 [note...] Append a workout with estimated active kcal
+  hackdiet metric define CODE MIN MAX NAME   Define a personal integer scale
+  hackdiet metric CODE VALUE [note...]       Record or replace a daily rating
+  hackdiet event LABEL                       Mark a dated event on the chart
   hackdiet height 171            Save height in centimeters for BMI
 
 Options (before the weight/note, or with a viewing command):
@@ -35,6 +38,9 @@ enum Action {
     Record(f64, Option<String>),
     Height(f64),
     Exercise(log::Workout),
+    Define(String, log::Metric),
+    Rating(String, i32, Option<String>),
+    Event(String),
 }
 
 struct Options {
@@ -81,6 +87,39 @@ fn parse(args: Vec<String>) -> Result<Options> {
             }
             "--no-graph" => opt.no_graph = true,
             "--kitty" => opt.kitty = true,
+            "metric" | "event" if words.is_empty() => {
+                let rest = &args[i + 1..];
+                if rest.iter().any(|s| s.chars().any(char::is_control)) {
+                    return Err("Metric and event text must fit on one line".into());
+                }
+                opt.action = match (args[i].as_str(), rest) {
+                    ("event", labels) if !labels.join(" ").trim().is_empty() => {
+                        Action::Event(labels.join(" ").trim().into())
+                    }
+                    ("event", _) => return Err("Expected event LABEL".into()),
+                    (_, [verb, code, min, max, name @ ..]) if verb == "define" => {
+                        if opt.date.is_some() {
+                            return Err("--date applies to observations and events".into());
+                        }
+                        Action::Define(
+                            code.clone(),
+                            log::Metric::new(code, &name.join(" "), min.parse()?, max.parse()?)?,
+                        )
+                    }
+                    (_, [code, value, note @ ..]) if code != "define" => Action::Rating(
+                        code.clone(),
+                        value.parse()?,
+                        (!note.is_empty()).then(|| note.join(" ")),
+                    ),
+                    _ => {
+                        return Err(
+                            "Expected metric define CODE MIN MAX NAME or metric CODE VALUE [note]"
+                                .into(),
+                        )
+                    }
+                };
+                return Ok(opt);
+            }
             "exercise" if words.is_empty() => {
                 let kcal = log::calories(
                     args.get(i + 1)
@@ -133,7 +172,7 @@ fn parse(args: Vec<String>) -> Result<Options> {
             ),
         };
     if opt.date.is_some() {
-        return Err("--date requires a weight or exercise entry".into());
+        return Err("--date requires a weight, workout, rating or event".into());
     }
     if opt.no_graph && opt.png.is_some() {
         return Err("--png and --no-graph cannot be combined".into());
@@ -200,6 +239,8 @@ fn run() -> Result<()> {
         .entries
         .keys()
         .chain(log.workouts.keys())
+        .chain(log.events.keys())
+        .chain(log.metrics.values().flat_map(|m| m.ratings.keys()))
         .any(|d| *d > today)
     {
         return Err("The log contains a future entry; correct it before continuing".into());
@@ -228,6 +269,32 @@ fn run() -> Result<()> {
             println!("Recorded workout on {date}: {kcal} active kcal.");
             None
         }
+        Action::Define(code, metric) => {
+            log.define_metric(code.clone(), metric)?;
+            log.save(&file)?;
+            println!("Defined metric {code}.");
+            None
+        }
+        Action::Rating(code, value, note) => {
+            let metric = log.metrics.get_mut(&code).ok_or_else(|| {
+                format!("Unknown metric {code}. Use metric define CODE MIN MAX NAME first.")
+            })?;
+            metric.validate(value)?;
+            let entry = metric.ratings.entry(date).or_default();
+            entry.0 = value;
+            if let Some(note) = note {
+                entry.1 = note;
+            }
+            log.save(&file)?;
+            println!("Recorded {code} on {date}: {value}.");
+            None
+        }
+        Action::Event(label) => {
+            log.events.entry(date).or_default().push(label);
+            log.save(&file)?;
+            println!("Recorded event on {date}.");
+            None
+        }
         Action::Height(height) => {
             log.height = Some(height);
             log.save(&file)?;
@@ -244,7 +311,11 @@ fn run() -> Result<()> {
         .filter(|d| d.date >= start && d.date <= end)
         .collect();
     let exercise = stats::exercise_days(&log.workouts, start, end);
-    let has_data = !selected.is_empty() || !exercise.is_empty();
+    let timeline = chart::Timeline::new(&log, start, end);
+    let has_data = !timeline.groups.is_empty()
+        || !timeline.events.is_empty()
+        || !selected.is_empty()
+        || !exercise.is_empty();
     let graphics = !opt.no_graph
         && has_data
         && std::io::stdout().is_terminal()
@@ -252,6 +323,15 @@ fn run() -> Result<()> {
     if !graphics {
         println!("{}", stats::period_label(start, end));
         stats::print_summary(&selected, log.height);
+        for metrics in timeline.groups.values() {
+            for (_, metric) in metrics {
+                let (date, (value, _)) = metric.ratings.range(start..=end).next_back().unwrap();
+                println!("{:<19} {} ({date})", metric.name, value);
+            }
+        }
+        for (date, label) in &timeline.events {
+            println!("{date}    {label}");
+        }
         if !exercise.is_empty() {
             println!("{:<19} {}", "Exercise", stats::exercise_summary(&exercise));
         }
@@ -259,7 +339,8 @@ fn run() -> Result<()> {
     if !opt.no_graph && has_data {
         if graphics || opt.png.is_some() {
             let image = tempfile::Builder::new().suffix(".png").tempfile()?;
-            chart::render(image.path(), &selected, &exercise, start, end, log.height)?;
+            let image_height =
+                chart::render(image.path(), &selected, &exercise, &timeline, log.height)?;
             if let Some(path) = opt.png {
                 let path = resolve_path(&path)?;
                 let export = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;
@@ -268,10 +349,7 @@ fn run() -> Result<()> {
                 println!("Chart saved: {}", path.display());
             }
             if graphics {
-                chart::display(
-                    &std::fs::read(image.path())?,
-                    !selected.is_empty() && !exercise.is_empty(),
-                )?;
+                chart::display(&std::fs::read(image.path())?, image_height)?;
             }
         }
         if !graphics && !selected.is_empty() {

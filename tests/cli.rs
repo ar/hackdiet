@@ -134,3 +134,53 @@ fn workouts_append_independently_of_weight_and_render_in_both_views() {
     }
     assert_eq!(log, fs::read_to_string(dir.join("hackdiet.md")).unwrap());
 }
+
+#[test]
+fn personal_scales_and_events_share_a_timeline_without_weigh_ins() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    let yesterday = (Local::now().date_naive() - Duration::days(1)).to_string();
+    ok(dir, &["metric", "define", "en", "0", "5", "Energy"]);
+    ok(dir, &["metric", "define", "ws", "0", "5", "Work stress"]);
+    ok(dir, &["metric", "define", "load", "-2", "10", "Workload"]);
+    ok(
+        dir,
+        &["--date", &yesterday, "metric", "en", "2", "late | shift"],
+    );
+    ok(dir, &["--date", &yesterday, "metric", "en", "0"]);
+    ok(dir, &["metric", "ws", "5"]);
+    ok(dir, &["metric", "load", "-2"]);
+    ok(dir, &["event", "Release | day"]);
+    ok(dir, &["event", "First shift"]);
+    let text = ok(dir, &["--png", "timeline.png"]);
+    for label in [
+        "Work stress",
+        "Energy",
+        "Workload",
+        "Release | day",
+        "First shift",
+        &format!("0 ({yesterday})"),
+    ] {
+        assert!(text.contains(label));
+    }
+    let png = fs::read(dir.join("timeline.png")).unwrap();
+    assert_eq!(u32::from_be_bytes(png[20..24].try_into().unwrap()), 676);
+    let file = dir.join("hackdiet.md");
+    let saved = fs::read_to_string(&file).unwrap();
+    assert!(saved.contains(r"late \| shift"));
+    assert_eq!(saved.matches(&yesterday).count(), 1);
+    for args in [
+        vec!["metric", "en", "6"],
+        vec!["metric", "xx", "3"],
+        vec!["metric", "define", "en", "0", "9", "other"],
+        vec!["metric", "define", "bad", "5", "1", "bad"],
+        vec!["event", ""],
+    ] {
+        assert!(!run(dir, &args).status.success());
+    }
+    assert_eq!(fs::read_to_string(&file).unwrap(), saved);
+    let corrupt = saved.replace("Energy (0–5)", "Energy (1–5)");
+    fs::write(&file, &corrupt).unwrap();
+    assert!(!run(dir, &["exercise", "100"]).status.success());
+    assert_eq!(fs::read_to_string(file).unwrap(), corrupt);
+}

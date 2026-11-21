@@ -17,16 +17,61 @@ pub struct Workout {
     pub note: String,
 }
 
+#[derive(Debug)]
+pub struct Metric {
+    pub name: String,
+    pub min: i32,
+    pub max: i32,
+    pub ratings: BTreeMap<NaiveDate, (i32, String)>,
+}
+
+impl Metric {
+    pub fn new(code: &str, name: &str, min: i32, max: i32) -> Result<Self> {
+        if code.is_empty()
+            || code == "define"
+            || !code
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+        {
+            return Err("Choose a metric code using letters, digits, hyphens or underscores (define is reserved)".into());
+        }
+        if name.trim().is_empty() || name.chars().any(char::is_control) || min >= max {
+            return Err("A metric needs a name and an increasing integer range".into());
+        }
+        Ok(Self {
+            name: name.trim().into(),
+            min,
+            max,
+            ratings: BTreeMap::new(),
+        })
+    }
+
+    pub fn validate(&self, value: i32) -> Result<()> {
+        if !(self.min..=self.max).contains(&value) {
+            return Err(format!(
+                "{} must be between {} and {}",
+                self.name, self.min, self.max
+            )
+            .into());
+        }
+        Ok(())
+    }
+}
+
 enum Section {
     Text(String),
     Height,
     Weight,
     Exercise,
+    Metric(String),
+    Events,
 }
 
 pub struct Log {
     pub entries: BTreeMap<NaiveDate, Entry>,
     pub workouts: BTreeMap<NaiveDate, Vec<Workout>>,
+    pub metrics: BTreeMap<String, Metric>,
+    pub events: BTreeMap<NaiveDate, Vec<String>>,
     pub height: Option<f64>,
     layout: Vec<Section>,
 }
@@ -79,6 +124,10 @@ impl Log {
         let mut entries = BTreeMap::new();
         let mut workouts: BTreeMap<NaiveDate, Vec<Workout>> = BTreeMap::new();
         let mut layout = Vec::new();
+        let mut metrics = BTreeMap::new();
+        let mut events: BTreeMap<NaiveDate, Vec<String>> = BTreeMap::new();
+        let mut pending_metric = None;
+        let mut found_events = false;
         let mut found_weight = false;
         let mut found_exercise = false;
         let mut other_table = false;
@@ -99,31 +148,65 @@ impl Log {
                 continue;
             }
             let header = cells(&lines[start]).unwrap_or_default();
-            let exercise = if header == ["Date", "Weight (kg)", "Note"] {
+            if pending_metric.is_some() && lines[start].trim_start().starts_with('#') {
+                return Err("Missing metric table before next heading".into());
+            }
+            if let Some(declaration) = lines[start].strip_prefix("## Metric: ") {
+                let (code, detail) = declaration
+                    .split_once(" — ")
+                    .ok_or("Invalid metric heading")?;
+                let (name, range) = detail
+                    .trim_end()
+                    .strip_suffix(')')
+                    .and_then(|s| s.rsplit_once(" ("))
+                    .ok_or("Missing metric range")?;
+                let (min, max) = range
+                    .split_once('–')
+                    .ok_or("Expected metric range MIN–MAX")?;
+                let metric = Metric::new(code, name, min.parse()?, max.parse()?)?;
+                if metrics.insert(code.to_owned(), metric).is_some() {
+                    return Err(format!("Duplicate metric code: {code}").into());
+                }
+                pending_metric = Some(code.to_owned());
+                layout.push(Section::Text(lines[start].clone()));
+                start += 1;
+                continue;
+            }
+            let section = if pending_metric.is_some() && header == ["Date", "Value", "Note"] {
+                Section::Metric(pending_metric.take().unwrap())
+            } else if header == ["Date", "Weight (kg)", "Note"] {
                 if found_weight {
                     return Err("Multiple weight tables in log".into());
                 }
                 found_weight = true;
-                layout.push(Section::Weight);
-                false
+                Section::Weight
             } else if header == ["Date", "Active kcal", "Description"] {
                 if found_exercise {
                     return Err("Multiple exercise tables in log".into());
                 }
                 found_exercise = true;
-                layout.push(Section::Exercise);
-                true
+                Section::Exercise
+            } else if header == ["Date", "Event"] {
+                if found_events {
+                    return Err("Multiple event tables in log".into());
+                }
+                found_events = true;
+                Section::Events
             } else {
                 other_table |= lines[start].trim_start().starts_with('|');
                 layout.push(Section::Text(lines[start].clone()));
                 start += 1;
                 continue;
             };
+            if pending_metric.is_some() {
+                return Err("Missing metric table".into());
+            }
+            let columns = header.len();
             let sep = lines
                 .get(start + 1)
                 .ok_or("Missing Markdown table separator")?;
             let sep = cells(sep)?;
-            if sep.len() != 3
+            if sep.len() != columns
                 || sep.iter().any(|c| {
                     let s = c.trim_matches(':');
                     s.len() < 3 || !s.chars().all(|c| c == '-')
@@ -134,19 +217,35 @@ impl Log {
             let mut end = start + 2;
             while end < lines.len() && lines[end].trim_start().starts_with('|') {
                 let row = cells(&lines[end])?;
-                if row.len() != 3 {
+                if row.len() != columns {
                     return Err(format!(
-                        "Line {}: expected three columns; escape note pipes as \\|",
+                        "Line {}: expected {columns} columns; escape note pipes as \\|",
                         end + 1
                     )
                     .into());
                 }
                 let date = NaiveDate::parse_from_str(&row[0], "%Y-%m-%d")
                     .map_err(|e| format!("Line {}: invalid date: {e}", end + 1))?;
-                if row[2].chars().any(char::is_control) {
+                if row.last().unwrap().chars().any(char::is_control) {
                     return Err("Notes cannot contain control characters".into());
                 }
-                if exercise {
+                if let Section::Metric(code) = &section {
+                    let metric = metrics.get_mut(code).unwrap();
+                    let value = row[1].parse()?;
+                    metric.validate(value)?;
+                    if metric
+                        .ratings
+                        .insert(date, (value, row[2].clone()))
+                        .is_some()
+                    {
+                        return Err(format!("Duplicate {code} rating for {date}").into());
+                    }
+                } else if matches!(section, Section::Events) {
+                    if row[1].is_empty() {
+                        return Err("Missing event label".into());
+                    }
+                    events.entry(date).or_default().push(row[1].clone());
+                } else if matches!(section, Section::Exercise) {
                     workouts.entry(date).or_default().push(Workout {
                         kcal: calories(&row[1])?,
                         note: row[2].clone(),
@@ -165,9 +264,13 @@ impl Log {
                 }
                 end += 1;
             }
+            layout.push(section);
             start = end;
         }
-        if !found_weight && !found_exercise && other_table {
+        if pending_metric.is_some() {
+            return Err("Missing metric table".into());
+        }
+        if !found_weight && !found_exercise && !found_events && metrics.is_empty() && other_table {
             return Err("Unrecognized table in log".into());
         }
         if !found_weight {
@@ -182,9 +285,33 @@ impl Log {
         Ok(Self {
             entries,
             workouts,
+            metrics,
+            events,
             height,
             layout,
         })
+    }
+
+    pub fn define_metric(&mut self, code: String, metric: Metric) -> Result<()> {
+        if self.metrics.contains_key(&code) {
+            return Err(format!("Metric {code} already exists").into());
+        }
+        self.layout.push(Section::Text(format!(
+            "\n## Metric: {code} — {} ({}–{})\n",
+            metric.name, metric.min, metric.max
+        )));
+        self.layout.push(Section::Metric(code.clone()));
+        self.metrics.insert(code, metric);
+        Ok(())
+    }
+
+    fn write_events(&self, s: &mut String) {
+        s.push_str("| Date       | Event |\n|------------|-------|\n");
+        for (date, labels) in &self.events {
+            for label in labels {
+                s.push_str(&format!("| {date} | {} |\n", escape(label)));
+            }
+        }
     }
 
     fn markdown(&self) -> String {
@@ -201,6 +328,16 @@ impl Log {
                         s.push_str(&format!("Height: {h:.2} cm\n"));
                     }
                 }
+                Section::Events => self.write_events(&mut s),
+                Section::Metric(code) => write_table(
+                    &mut s,
+                    "Value",
+                    "Note",
+                    self.metrics[code]
+                        .ratings
+                        .iter()
+                        .map(|(date, (value, note))| (date, value.to_string(), escape(note))),
+                ),
                 Section::Weight => {
                     if let Some(h) = self
                         .height
@@ -215,6 +352,10 @@ impl Log {
                     exercise_written = true;
                 }
             }
+        }
+        if !self.events.is_empty() && !self.layout.iter().any(|s| matches!(s, Section::Events)) {
+            s.push_str("\n## Events\n\n");
+            self.write_events(&mut s);
         }
         if !exercise_written && !self.workouts.is_empty() {
             s.push_str("\n## Exercise\n\n");

@@ -75,6 +75,37 @@ the weight plot. Each point includes that day and the six preceding calendar day
 including dates before the view starts. A day with no logged workout contributes
 zero logged kcal. The deficit estimate still comes from the weight trend alone.
 
+## Personal ratings and events
+
+Define a metric once with a short code, inclusive whole-number bounds, and a
+display name. Each definition and its daily ratings live together in their own
+Markdown section in the log.
+
+```sh
+hackdiet metric define en 0 5 "Perceived energy"
+hackdiet metric define ws 0 5 "Work stress"
+hackdiet metric define load 0 10 Workload
+
+hackdiet metric en 4 after a long walk
+hackdiet metric ws 0
+hackdiet metric load 7
+hackdiet event Release day
+hackdiet --date 2026-09-28 metric ws 5
+hackdiet --png month.png this
+```
+
+Recording a rating again replaces the value for that date. As with weight, omit
+the note to keep it or pass `""` to clear it. A zero is a recorded score. Skipped
+dates leave gaps. Events append, so several can share a date. To correct an
+event, edit its row in the Events table.
+
+The chart groups metrics with identical bounds on one fixed scale. Other ranges
+get their own panels. All panels share the weight and exercise date axis. Dated
+event labels above the chart line up with amber dashed lines in every panel.
+Ratings and events can also be viewed on their own, including before your first
+weigh-in. The text summary lists each metric’s latest score in the selected
+period and the date it was recorded.
+
 ## Longer views
 
 Like `mdl`, `this` and `last` count **calendar months**:
