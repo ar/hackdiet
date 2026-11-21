@@ -1,5 +1,5 @@
 use crate::{
-    log::{Log, Metric},
+    log::{Log, Metric, Section},
     stats::{self, Day, ExerciseDay},
     Result,
 };
@@ -17,7 +17,16 @@ pub fn supported() -> bool {
         || env::var("TERM").is_ok_and(|s| s == "xterm-ghostty" || s == "xterm-kitty")
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+enum Panel {
+    Weight,
+    Exercise,
+    Events,
+    Metrics(i32, i32),
+}
+
 pub struct Timeline<'a> {
+    panels: Vec<Panel>,
     start: NaiveDate,
     end: NaiveDate,
     pub groups: BTreeMap<(i32, i32), Vec<(usize, &'a Metric)>>,
@@ -28,15 +37,27 @@ impl<'a> Timeline<'a> {
     pub fn new(log: &'a Log, start: NaiveDate, end: NaiveDate) -> Self {
         let mut groups: BTreeMap<_, Vec<_>> = BTreeMap::new();
         let mut style_indices = BTreeMap::<_, usize>::new();
-        for metric in log.metrics.values() {
-            let next_style = style_indices.entry((metric.min, metric.max)).or_default();
-            if metric.ratings.range(start..=end).next().is_some() {
-                groups
-                    .entry((metric.min, metric.max))
-                    .or_default()
-                    .push((*next_style, metric));
+        let mut panels = Vec::new();
+        for section in log.sections() {
+            match section {
+                Section::Weight => panels.push(Panel::Weight),
+                Section::Exercise => panels.push(Panel::Exercise),
+                Section::Events => panels.push(Panel::Events),
+                Section::Metric(code) => {
+                    let metric = &log.metrics[code];
+                    let range = (metric.min, metric.max);
+                    let next_style = style_indices.entry(range).or_default();
+                    if metric.ratings.range(start..=end).next().is_some() {
+                        let group = groups.entry(range).or_default();
+                        if group.is_empty() {
+                            panels.push(Panel::Metrics(metric.min, metric.max));
+                        }
+                        group.push((*next_style, metric));
+                    }
+                    *next_style += 1;
+                }
+                Section::Text(_) | Section::Height => {}
             }
-            *next_style += 1;
         }
         let events = log
             .events
@@ -44,6 +65,7 @@ impl<'a> Timeline<'a> {
             .flat_map(|(&date, labels)| labels.iter().map(move |label| (date, label.as_str())))
             .collect();
         Self {
+            panels,
             start,
             end,
             groups,
@@ -130,20 +152,22 @@ pub fn render(
         50 + timeline.events.len() as u32 * 28
     };
     let metric_height = |count: usize| 240 + 30 * count as u32;
-    let image_height = event_height
-        + weight_height
-        + exercise_height
-        + timeline
-            .groups
-            .values()
-            .map(|group| metric_height(group.len()))
-            .sum::<u32>();
+    let panel_height = |panel: &Panel| match *panel {
+        Panel::Weight => weight_height,
+        Panel::Exercise => exercise_height,
+        Panel::Events => event_height,
+        Panel::Metrics(min, max) => metric_height(timeline.groups[&(min, max)].len()),
+    };
+    let image_height = timeline.panels.iter().map(panel_height).sum();
     let root = BitMapBackend::new(path, (1200, image_height)).into_drawing_area();
     root.fill(&bg)?;
-    let (events, panels) = root.split_vertically(event_height);
-    let (weight_area, panels) = panels.split_vertically(weight_height);
-    let (mut metrics_area, exercise_area) =
-        panels.split_vertically(panels.dim_in_pixel().1 - exercise_height);
+    let mut remaining = root.clone();
+    let mut areas = BTreeMap::new();
+    for panel in &timeline.panels {
+        let (area, rest) = remaining.split_vertically(panel_height(panel));
+        areas.insert(*panel, area);
+        remaining = rest;
+    }
     let span = (end - start).num_days().max(1) as f64;
     let x_range = -0.4..span + 0.4;
     let label = |x: &f64| {
@@ -156,6 +180,7 @@ pub fn render(
     };
     let right_axis = if height.is_some() { 75 } else { 0 };
     if !timeline.events.is_empty() {
+        let events = &areas[&Panel::Events];
         events.draw(&Text::new(
             format!("Events  |  {}", stats::period_label(start, end)),
             (24, 12),
@@ -188,8 +213,7 @@ pub fn render(
         }
     }
     for (&(min, max), group) in &timeline.groups {
-        let (area, rest) = metrics_area.split_vertically(metric_height(group.len()));
-        metrics_area = rest;
+        let area = &areas[&Panel::Metrics(min, max)];
         let (heading, panel) = area.split_vertically(30 * group.len() as u32 + 12);
         let mut chart = ChartBuilder::on(&panel)
             .margin(24)
@@ -255,7 +279,8 @@ pub fn render(
     if !exercise.is_empty() {
         let blue = RGBColor(45, 97, 155);
         let bar = RGBColor(157, 197, 220);
-        let (heading, panel) = exercise_area.split_vertically(if combined { 46 } else { 85 });
+        let (heading, panel) =
+            areas[&Panel::Exercise].split_vertically(if combined { 46 } else { 85 });
         heading.draw(&Text::new(
             format!("Exercise  |  {}", stats::exercise_summary(exercise)),
             (24, 10),
@@ -321,7 +346,7 @@ pub fn render(
         return Ok(image_height);
     }
     // Give the summary its own space so it never obscures the weight curves.
-    let (header, plot) = weight_area.split_vertically(142);
+    let (header, plot) = areas[&Panel::Weight].split_vertically(142);
     header.draw(&Text::new(
         format!("Weight  |  {}", stats::period_label(start, end)),
         (24, 28),
@@ -539,6 +564,49 @@ pub fn display(png: &[u8], image_height: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn panels_and_shared_scale_legends_follow_markdown_order() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        let date = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        writeln!(file, "| Date | Active kcal | Description |\n|---|---|---|").unwrap();
+        for (code, max, visible) in [
+            ("unused", 5, false),
+            ("load", 10, true),
+            ("z", 5, true),
+            ("a", 5, true),
+        ] {
+            writeln!(
+                file,
+                "\n## Metric: {code} — {code} (0–{max})\n\n| Date | Value | Note |\n|---|---|---|"
+            )
+            .unwrap();
+            if visible {
+                writeln!(file, "| {date} | 2 | |").unwrap();
+            }
+            if code == "z" {
+                writeln!(file, "\n| Date | Event |\n|---|---|\n| {date} | Shift |").unwrap();
+            }
+        }
+        writeln!(file, "\n| Date | Weight (kg) | Note |\n|---|---|---|").unwrap();
+        let log = Log::read(file.path()).unwrap();
+        let timeline = Timeline::new(&log, date, date);
+        assert_eq!(
+            timeline.panels,
+            [
+                Panel::Exercise,
+                Panel::Metrics(0, 10),
+                Panel::Metrics(0, 5),
+                Panel::Events,
+                Panel::Weight
+            ]
+        );
+        let names: Vec<_> = timeline.groups[&(0, 5)]
+            .iter()
+            .map(|(_, metric)| metric.name.as_str())
+            .collect();
+        assert_eq!(names, ["z", "a"]);
+    }
+
     #[test]
     fn kitty_payload_roundtrips_in_bounded_chunks() {
         let bytes: Vec<_> = (0..20000).map(|i| (i % 251) as u8).collect();

@@ -99,9 +99,12 @@ the note to keep it or pass `""` to clear it. A zero is a recorded score. Skippe
 dates leave gaps. Events append, so several can share a date. To correct an
 event, edit its row in the Events table.
 
-The chart groups metrics with identical bounds on one fixed scale. Other ranges
+Chart panels follow the order of the tables in the Markdown file. Move a
+section, including its table, to move its panel. Metrics with identical bounds
+share a panel at the position of the first metric with a rating in the selected
+period. Its legend follows the same table order. Other ranges
 get their own panels. All panels share the weight and exercise date axis. Dated
-event labels above the chart line up with amber dashed lines in every panel.
+event labels in the Events panel line up with amber dashed lines in every panel.
 Ratings and events can also be viewed on their own, including before your first
 weigh-in. The text summary lists each metric’s latest score in the selected
 period and the date it was recorded.

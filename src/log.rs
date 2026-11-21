@@ -58,7 +58,7 @@ impl Metric {
     }
 }
 
-enum Section {
+pub(crate) enum Section {
     Text(String),
     Height,
     Weight,
@@ -305,6 +305,26 @@ impl Log {
         Ok(())
     }
 
+    pub fn sections(&self) -> &[Section] {
+        &self.layout
+    }
+
+    pub fn record_event(&mut self, date: NaiveDate, label: String) {
+        if !self.layout.iter().any(|s| matches!(s, Section::Events)) {
+            self.layout.push(Section::Text("\n## Events\n".into()));
+            self.layout.push(Section::Events);
+        }
+        self.events.entry(date).or_default().push(label);
+    }
+
+    pub fn record_workout(&mut self, date: NaiveDate, workout: Workout) {
+        if !self.layout.iter().any(|s| matches!(s, Section::Exercise)) {
+            self.layout.push(Section::Text("\n## Exercise\n".into()));
+            self.layout.push(Section::Exercise);
+        }
+        self.workouts.entry(date).or_default().push(workout);
+    }
+
     fn write_events(&self, s: &mut String) {
         s.push_str("| Date       | Event |\n|------------|-------|\n");
         for (date, labels) in &self.events {
@@ -316,7 +336,6 @@ impl Log {
 
     fn markdown(&self) -> String {
         let mut s = String::new();
-        let mut exercise_written = false;
         for section in &self.layout {
             match section {
                 Section::Text(line) => {
@@ -347,19 +366,8 @@ impl Log {
                     }
                     self.write_weights(&mut s);
                 }
-                Section::Exercise => {
-                    self.write_exercise(&mut s);
-                    exercise_written = true;
-                }
+                Section::Exercise => self.write_exercise(&mut s),
             }
-        }
-        if !self.events.is_empty() && !self.layout.iter().any(|s| matches!(s, Section::Events)) {
-            s.push_str("\n## Events\n\n");
-            self.write_events(&mut s);
-        }
-        if !exercise_written && !self.workouts.is_empty() {
-            s.push_str("\n## Exercise\n\n");
-            self.write_exercise(&mut s);
         }
         s
     }

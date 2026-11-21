@@ -264,7 +264,7 @@ fn run() -> Result<()> {
         }
         Action::Exercise(workout) => {
             let kcal = workout.kcal;
-            log.workouts.entry(date).or_default().push(workout);
+            log.record_workout(date, workout);
             log.save(&file)?;
             println!("Recorded workout on {date}: {kcal} active kcal.");
             None
@@ -290,7 +290,7 @@ fn run() -> Result<()> {
             None
         }
         Action::Event(label) => {
-            log.events.entry(date).or_default().push(label);
+            log.record_event(date, label);
             log.save(&file)?;
             println!("Recorded event on {date}.");
             None
