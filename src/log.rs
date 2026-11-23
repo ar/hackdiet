@@ -22,7 +22,7 @@ pub struct Metric {
     pub name: String,
     pub min: i32,
     pub max: i32,
-    pub ratings: BTreeMap<NaiveDate, (i32, String)>,
+    pub ratings: BTreeMap<NaiveDate, (f64, String)>,
 }
 
 impl Metric {
@@ -46,8 +46,8 @@ impl Metric {
         })
     }
 
-    pub fn validate(&self, value: i32) -> Result<()> {
-        if !(self.min..=self.max).contains(&value) {
+    pub fn validate(&self, value: f64) -> Result<()> {
+        if !value.is_finite() || !(f64::from(self.min)..=f64::from(self.max)).contains(&value) {
             return Err(format!(
                 "{} must be between {} and {}",
                 self.name, self.min, self.max
@@ -412,6 +412,13 @@ fn write_table<'a>(
     rows: impl IntoIterator<Item = (&'a NaiveDate, String, String)>,
 ) {
     let rows: Vec<_> = rows.into_iter().collect();
+    let value_width = rows
+        .iter()
+        .map(|(_, value, _)| value.len())
+        .max()
+        .unwrap_or(0)
+        .max(value.len())
+        .max(11);
     let note_width = rows
         .iter()
         .map(|(_, _, note)| note.chars().count())
@@ -419,16 +426,17 @@ fn write_table<'a>(
         .unwrap_or(0)
         .max(description.len());
     s.push_str(&format!(
-        "| {:<10} | {:>11} | {:<note_width$} |\n",
+        "| {:<10} | {:>value_width$} | {:<note_width$} |\n",
         "Date", value, description
     ));
     s.push_str(&format!(
-        "|------------|------------:|{}|\n",
+        "|------------|{}:|{}|\n",
+        "-".repeat(value_width + 1),
         "-".repeat(note_width + 2)
     ));
     for (date, weight, note) in rows {
         s.push_str(&format!(
-            "| {date} | {weight:>11} | {note:<note_width$} |\n"
+            "| {date} | {weight:>value_width$} | {note:<note_width$} |\n"
         ));
     }
 }

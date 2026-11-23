@@ -259,7 +259,7 @@ pub fn render(
             let points = metric
                 .ratings
                 .range(start..=end)
-                .map(|(&date, (value, _))| (timeline.x(date), f64::from(*value)));
+                .map(|(&date, (value, _))| (timeline.x(date), *value));
             for (a, b) in points
                 .clone()
                 .zip(points.clone().skip(1))

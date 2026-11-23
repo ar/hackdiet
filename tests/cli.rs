@@ -136,6 +136,44 @@ fn workouts_append_independently_of_weight_and_render_in_both_views() {
 }
 
 #[test]
+fn decimal_metrics_roundtrip_and_plot_without_truncation() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    ok(dir, &["metric", "define", "score", "-10", "10", "Score"]);
+    let yesterday = (Local::now().date_naive() - Duration::days(1)).to_string();
+    ok(dir, &["--date", &yesterday, "metric", "score", "-1.2345"]);
+    ok(dir, &["metric", "score", "2.123456789012345", "keep note"]);
+    let text = ok(dir, &["--png", "decimal.png"]);
+    assert!(text.contains("2.123456789012345"));
+    let decimal_png = fs::read(dir.join("decimal.png")).unwrap();
+    ok(dir, &["--png", "integer.png", "metric", "score", "2"]);
+    assert_ne!(decimal_png, fs::read(dir.join("integer.png")).unwrap());
+    ok(dir, &["metric", "score", "2.123456789012345"]);
+
+    let file = dir.join("hackdiet.md");
+    let saved = fs::read_to_string(&file).unwrap();
+    assert!(saved.contains("-1.2345"));
+    assert!(saved.contains("2.123456789012345"));
+    assert!(saved.contains("keep note"));
+    let table = saved.split("## Metric:").nth(1).unwrap();
+    let widths: Vec<_> = table
+        .lines()
+        .filter(|l| l.starts_with('|'))
+        .map(str::len)
+        .collect();
+    assert!(widths.windows(2).all(|w| w[0] == w[1]));
+    for invalid in ["NaN", "inf", "-inf", "10.0001", "-10.0001"] {
+        assert!(!run(dir, &["metric", "score", invalid]).status.success());
+        assert_eq!(fs::read_to_string(&file).unwrap(), saved);
+        let corrupt = saved.replace("2.123456789012345", invalid);
+        fs::write(&file, &corrupt).unwrap();
+        assert!(!run(dir, &["metric", "score", "1"]).status.success());
+        assert_eq!(fs::read_to_string(&file).unwrap(), corrupt);
+        fs::write(&file, &saved).unwrap();
+    }
+}
+
+#[test]
 fn personal_scales_and_events_share_a_timeline_without_weigh_ins() {
     let temp = tempfile::tempdir().unwrap();
     let dir = temp.path();

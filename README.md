@@ -86,13 +86,17 @@ hackdiet metric define en 0 5 "Perceived energy"
 hackdiet metric define ws 0 5 "Work stress"
 hackdiet metric define load 0 10 Workload
 
-hackdiet metric en 4 after a long walk
+hackdiet metric en 4.125 after a long walk
 hackdiet metric ws 0
 hackdiet metric load 7
 hackdiet event Release day
 hackdiet --date 2026-09-28 metric ws 5
 hackdiet --png month.png this
 ```
+
+Ratings accept floating-point decimals within the defined bounds and retain their
+precision when saved and plotted. The value column has room for four decimal
+places in typical ratings and expands for longer values.
 
 Recording a rating again replaces the value for that date. As with weight, omit
 the note to keep it or pass `""` to clear it. A zero is a recorded score. Skipped

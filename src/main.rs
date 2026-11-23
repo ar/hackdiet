@@ -16,7 +16,7 @@ Usage:
   hackdiet this [N]              Current month and N−1 preceding months
   hackdiet last [N]              N complete months before this month
   hackdiet exercise 300 [note...] Append a workout with estimated active kcal
-  hackdiet metric define CODE MIN MAX NAME   Define a personal integer scale
+  hackdiet metric define CODE MIN MAX NAME   Define a scale with integer bounds
   hackdiet metric CODE VALUE [note...]       Record or replace a daily rating
   hackdiet event LABEL                       Mark a dated event on the chart
   hackdiet height 171            Save height in centimeters for BMI
@@ -39,7 +39,7 @@ enum Action {
     Height(f64),
     Exercise(log::Workout),
     Define(String, log::Metric),
-    Rating(String, i32, Option<String>),
+    Rating(String, f64, Option<String>),
     Event(String),
 }
 
